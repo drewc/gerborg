@@ -1,0 +1,6 @@
+#+TITLE: Gerbil Org Mode
+
+I use [[https://orgmode.org/][Org mode]] for a lot of things. I use [[https://cons.io/][Gerbil Scheme]] for a lot of things.
+GerBorg is where they unite.
+
+

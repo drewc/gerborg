@@ -1,0 +1,40 @@
+#+TITLE: Org has variables
+
+For example: 
+#+begin_quote
+  "KEYWORD is a TODO keyword, which has to belong to the list defined in
+  ~org-todo-keywords-1~. Case is significant." -- [[file:org-syntax.org::#Headlines_and_Sections][Headlines and Sections]]
+#+end_quote
+
+
+#+begin_quote
+"Depending on the option ~org-footnote-define-inline~, the definition will be
+placed right into the text as part of the reference, or separately into the
+location determined by the option ~org-footnote-section~."
+#+end_quote
+
+#+begin_src emacs-lisp
+  ;; In Emacs
+  (flet ((v (s) (cons s (symbol-value s))))
+    (with-temp-buffer
+      (org-mode)
+      (list (v 'org-todo-keywords-1)
+            (v 'org-footnote-section)
+            (v 'org-footnote-define-inline))))
+#+end_src
+
+Emacs variables can be per buffer, and are dynamic. Alist to the rescue.
+
+#+begin_src gerbil :tangle environment.ss
+  (export #t)
+
+  (def default-org-env
+    `((org-todo-keywords-1 . ("TODO" "DONE"))
+      (org-footnote-section . "Footnotes")
+      (org-footnote-define-inline #f)))
+
+  (def current-org-env (make-parameter default-org-env))
+
+  (def (org-env-ref key (env (current-org-env)))
+    (assget key env))
+#+end_src
