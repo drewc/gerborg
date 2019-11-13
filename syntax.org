@@ -4,13 +4,15 @@
 #+LANGUAGE: en
 #+BIND: sentence-end-double-space t
 
-This document describes and comments Org syntax as it is currently
-read by its parser (Org Elements) and, therefore, by the export
-framework.  It also includes a few comments on that syntax.
+#+TODO: TODO STARTED | DONE
 
-A core concept in this syntax is that only headlines, sections,
-planning lines and property drawers are context-free[fn:1][fn:2].
-Every other syntactical part only exists within specific environments.
+This document describes and implements Org syntax as it is currently read by its
+parser (Org Elements) and, therefore, by the export framework.  It also includes
+a few comments on that syntax.
+
+A core concept in this syntax is that only headlines, sections, planning lines
+and property drawers are context-free[fn:1][fn:2].  Every other syntactical part
+only exists within specific environments.
 
 #+begin_src gerbil
   (import :drewc/smug :drewc/org/environment)
@@ -34,47 +36,102 @@ plain list element.
 
 Unless specified otherwise, case is not significant.
 
+#+NAME: ANY-STRING
 #+begin_src gerbil
   (def (ANY-STRING . strings)
-    (apply smug:or (map (cut smug:string-ci=? <>) strings)))
+    (apply .or (map (cut .string-ci=? <>) strings)))
 #+end_src
 
-* Whitespace and EOL
-
-We often want whitespace that is not a newline.
-
-#+NAME: WS
-#+begin_src gerbil
-  (def WS (sat (lambda (char) (and (char-whitespace? char) (not (char=? #\newline char))))))
-#+end_src
-
-At the same time, we want to know if it's the end of line. But, the EOF is also EOL.
-
-#+begin_src gerbil
-  (def EOL (smug:or #\newline (smug:not (item))))
-#+end_src
-
-
-* Optional
-
-Some things are optional.
-
-#+begin_src gerbil
-  (def (OPT p) (smug:or p (return #f)))
-#+end_src
-
-
-* Headlines and Sections
+* Global Definitions
   :PROPERTIES:
-  :CUSTOM_ID: Headlines_and_Sections
+  :header-args: :noweb-ref global
   :END:
 
+** EOF 
+
+  Though ~(.not (item))~ is also a way to say "this is the end of what we're
+  parsing", ~EOF~ is shorter and sweeter.
+
+#+begin_src gerbil
+  (def EOF (.not (item)))
+#+end_src
+
+** Whitespace
+
+
+ We often want whitespace that is not a newline.
+
+ #+NAME: WS
+ #+begin_src gerbil
+   (def WS (sat (? (and char-whitespace? (not (cut char=? #\newline <>))))))
+ #+end_src
+
+** Lines
+
+#+begin_src gerbil
+  (def BOL
+    (.let* (p (point)) (if (zero? p) (return #t)
+                           (peek (.begin (goto-char (- p 1)) #\newline)))))
+#+end_src
+ 
+We often want to know if it's the end of line. But, the EOF is also EOL.
+
+#+NAME: EOL
+ #+begin_src gerbil
+  (def EOL (.or #\newline EOF))
+ #+end_src
+
+ We only want to skip the last line once because otherwise ~some~ and ~many~
+ will recursively go on for many years. Don't ask me how I know.
+
+  #+NAME: SKIP-LINE
+  #+begin_src gerbil
+    (def SKIP-LINE
+      (let (S (sat (? (not (cut char=? <> #\newline)))))
+         (.or (.begin (skip S) (sat (cut char=? #\newline <>)))
+              (.begin (many1 S) EOF (return #!eof)))))
+  #+end_src
+
+** Optional
+
+ Some things are optional.
+ #+NAME: OPT
+ #+begin_src gerbil
+   (def (OPT p) (.or p (return #f)))
+ #+end_src
+
+** Rtrim
+
+ Whitespace often comes at the end.
+
+#+begin_src gerbil
+  (def RTRIM (cut .begin0 <> (skip WS)))
+#+end_src
+
+* STARTED Headlines and Sections
+  :PROPERTIES:
+  :CUSTOM_ID: Headlines_and_Sections
+  :header-args: :noweb-ref headlines-and-sections
+  :END:
+  
   A headline is defined as:
 
   #+BEGIN_EXAMPLE
   STARS KEYWORD PRIORITY TITLE TAGS
   #+END_EXAMPLE
 
+
+  #+begin_src gerbil :noweb-ref headline
+    (def (HEADLINE (min-depth 1))
+      (.let* ((s (STARS min-depth)) (k TODO-KEYWORD) (p PRIORITY)
+              (c COMMENT)
+              (title TITLE) (tags (.or (.begin0 TAGS (skip WS) EOL)
+                                       (.begin EOL #f))))
+        ['headline (list stars: s todo-keyword: k priority: p
+                         title: (list->string title) tags: tags
+                         commented?2: c footnote-section?: (footnote-section? title)
+                         archived?: (archived? tags))]))
+  #+end_src
   
   STARS is a string starting at column 0, containing at least one
   asterisk (and up to ~org-inlinetask-min-level~ if =org-inlinetask=
@@ -82,37 +139,37 @@ Some things are optional.
   asterisks is used to define the level of the headline.  It's the
   sole compulsory part of a headline.
 
-#+name: STARS
-  #+begin_src gerbil
-    (def STARS (smug:begin0 (at-least 1 #\*) #\space))
+#+begin_src gerbil
+  (def STARS-ONLY (.begin0 (many1 #\*) #\space))
+#+end_src
+  
+  A headline element can contain a deeper level headline element, so we'll add a
+  test.
+  
+ #+begin_src gerbil
+   (def (STARS (min-depth 1))
+    (RTRIM (sat (lambda (stars) (>= (length stars) min-depth)) STARS-ONLY)))
   #+end_src
 
   KEYWORD is a TODO keyword, which has to belong to the list defined
   in ~org-todo-keywords-1~.  Case is significant.
 
-#+NAME:TODO-KEYWORD
 #+begin_src gerbil
-  (def TODO-KEYWORD (apply smug:or (org-env-ref 'org-todo-keywords-1)))
+  (def TODO-KEYWORD (OPT (RTRIM (apply .or (org-env-ref 'org-todo-keywords-1)))))
 #+end_src
 
   PRIORITY is a priority cookie, i.e. a single letter preceded by
   a hash sign # and enclosed within square brackets.
 
-#+NAME: PRIORITY
 #+begin_src gerbil
-  (def PRIORITY (smug:and "[#" (smug:begin0 (sat char-alphabetic?) "]")))
+  (def PRIORITY (OPT (RTRIM (bracket "[#" (sat char-alphabetic?) "]"))))
 #+end_src
 
   TITLE can be made of any character but a new line.  Though, it will
   match after every other part have been matched. 
-#+NAME: TITLE+TAGS
+
 #+begin_src gerbil
-  (def TITLE+TAGS
-    (smug:let* ((things (smug:map (smug:or (smug:begin0 TAGS (skip WS) (smug:peek-char EOL))
-                                           (sat (? (not (cut char=? <> #\newline))))))))
-               (return (values (list->string (filter char? things))
-                               (let ((t (unless (null? things) (last things))))
-                                 (if (list? t) t #f))))))
+  (def TITLE (some (sat (? (not (cut char=? <> #\newline))))))
 #+end_src
 
   TAGS is made of words containing any alpha-numeric character,
@@ -120,12 +177,11 @@ Some things are optional.
   colons.
 
 #+begin_src gerbil
-  (def TAGS
-    (let (TAG (smug:and
-               #\: ((liftP list->string)
-                    (at-least 1 (smug:or (sat char-alphabetic?) (sat char-numeric?)
-                                         #\_ #\@ #\# #\%)))))
-   (smug:and " " (smug:begin0 (smug:map TAG) #\:))))
+  (def TAG
+    ((liftP list->string)
+     (many1 (.or (sat char-alphabetic?) (sat char-numeric?) #\_ #\@ #\# #\%))))
+
+  (def TAGS (RTRIM (OPT (bracket " :" (sepby1 TAG ":") ":"))))
 #+end_src
   
   Examples of valid headlines include:
@@ -136,63 +192,59 @@ Some things are optional.
   ,** DONE
 
   ,*** Some e-mail
-)
+
   ,**** TODO [#A] COMMENT Title :tag:a2%:
   #+END_EXAMPLE
     
-  If the first word appearing in the title is "COMMENT", the headline
-  will be considered as "commented".  Case is significant.
+  If the first word appearing in the title is "COMMENT", the headline will be
+  considered as "commented".  We'll return the point as the element parser wants
+  to know where title starts.
+
+Case is significant.
 
   #+begin_src gerbil
-    (def (comment? title)
-      (run (smug:or (smug:and "COMMENT" (smug:or " " EOL) (return #t))
-                    (return #f))
-           title))
+    (def COMMENT 
+      (.or (.begin "COMMENT" (.or " " EOL) (skip WS) (return #t))
+                    (return #f)))
   #+end_src
 
   If its title is ~org-footnote-section~, it will be considered as
-  a "footnote section".  Case is significant.
+  a "footnote section".  Case is significant. 
 
-  If "ARCHIVE" is one of its tags, it will be considered as
+ #+begin_src gerbil
+   (def (footnote-section? title)
+     (string=? (org-env-ref 'org-footnote-section) (list->string title))) 
+ #+end_src
+
+  If ~org-archive-tag~ is one of its tags, it will be considered as
   "archived".  Case is significant.
+
+#+begin_src gerbil
+  (def (archived? tags)
+    (if (and tags (member (org-env-ref 'org-archive-tag) tags)) #t #f))
+#+end_src
+
 
   A headline contains directly one section (optionally), followed by
   any number of deeper level headlines.
 
+
   #+begin_src gerbil
-    (def (HEADING (min-depth 1))
-      (def trim (cut smug:begin0 <> (skip WS)))
-      (def stars (sat (lambda (s) (>= (length s) min-depth)) STARS))
-
-      (smug:let* ((s (trim stars)) (k (OPT (trim TODO-KEYWORD)))
-                  (p (OPT (trim PRIORITY)))
-                  ((values title tags) (trim TITLE+TAGS)) (_ EOL))
-       [stars: s todo-keyword: k priority: p title: title tags: tags]))
-
-    (def SECTION-LINE (smug:and (smug:not STARS) (smug:read-line include-newline?: #t)))
-    (def SECTION (bind ((liftP string-concatenate) (at-least 1 SECTION-LINE))
-                       (lambda (s) (return ['section s])))) 
-
-    (def (HEADLINE min-depth: (min-depth 1) section: (section SECTION))
-      (smug:let* ((b (point))
-                  (heading (HEADING min-depth))
-                  (contents (smug:map
-                             (smug:or section
-                                      (HEADLINE min-depth: (1+ min-depth)
-                                                section: section))))
-                  (e (point)))
-       (cons 'headline (append heading [begin: b end: e contents: contents]))))
-
-
+    (def (HEADLINE-ELEMENT min-depth: (min-depth 1) section: (sect (.read-line)))
+      (.let* ((headline (HEADLINE min-depth))
+              (section (.begin0 (some sect) (.or (peek STARS-ONLY) (.not (item)))))
+              (subs (many (HEADLINE-ELEMENT min-depth: (1+ min-depth)
+                                             section: sect))))
+       (cons 'headline (append headline [section: (append section subs)]))))
   #+end_src
-
+  
   A section contains directly any greater element or element.  Only
   a headline can contain a section.  As an exception, text before the
   first headline in the document also belongs to a section.
 
   As an example, consider the following document:
 
-  #+BEGIN_SRC org
+  #+BEGIN_SRC org :noweb-ref nil
     An introduction.
 
     ,* A Headline 
@@ -217,10 +269,15 @@ Some things are optional.
     (headline
      (headline))))
   #+END_EXAMPLE
+
+Test time.
+
+
   
-* Affiliated Keywords
+* STARTED Affiliated Keywords
   :PROPERTIES:
   :CUSTOM_ID: Affiliated_keywords
+  :header-args: :noweb-ref affiliated-keywords
   :END:
 
   With the exception of clocks, headlines, inlinetasks, items, node
@@ -239,18 +296,17 @@ Some things are optional.
     ,#+ATTR_BACKEND: VALUE
   #+end_example
 
-#+ATTR_GLEO: true
- #+begin_src gerbil
-   (def AFFILIATED-KEYWORD
-     (smug:let* ((key (smug:and "#+" (smug:or KEY ATTR_BACKEND)))
-                 (opt (OPT (smug:and #\[ (smug:begin0 OPTIONAL #\]))))
-                 (_ ": ")
-                 (val (OPT VALUE))
-                 (_ EOL))
-       (if (and (not val) (not (member key '("CAPTION" "RESULTS"))))
-         (fail)
-         [key: key option: opt value: val])))
+ #+begin_src gerbil :noweb-ref "afk"
+   (def (AFFILIATED-KEYWORD (keyword KEY))
+     (.let* ((key (.begin "#+" (.or keyword ATTR_BACKEND)))
+             (opt OPTIONAL) (_ ": ") (val VALUE) (_ EOL))
+            ['affiliated-keyword
+             (list key: key option: (if (or (not opt) (null? opt)) #f
+                                        (list->string opt))
+                   value: (list->string val))
+             ]))
 #+end_src
+  
   KEY is either "CAPTION", "HEADER", "NAME", "PLOT" or "RESULTS"
   string.
 
@@ -263,13 +319,10 @@ Some things are optional.
 
 #+begin_src gerbil
   (def BACKEND
-    ((liftP list->string)
-     (at-least 1 (smug:and (smug:not #\:)
-                           (smug:or (sat char-alphabetic?) (sat char-numeric?)
-                                    #\- #\_)))))
+    (some1 (.or (sat char-alphabetic?) (sat char-numeric?) #\- #\_)))
 
-  (def ATTR_BACKEND (smug:let* ((a (smug:string-ci=? "ATTR_")) (b BACKEND))
-                      (string-append a b)))
+  (def ATTR_BACKEND (.let* ((a (.string-ci=? "ATTR_")) (b BACKEND))
+                      (string-append a (list->string b))))
 #+end_src
 
   OPTIONAL and VALUE can contain any character but a new line.  Only
@@ -277,8 +330,8 @@ Some things are optional.
 
 #+begin_src gerbil
   (def NO-EOL (sat (? (not (cut char=? #\newline <>)))))
-  (def OPTIONAL ((liftP list->string) (at-least 1 (smug:and (smug:not #\]) NO-EOL))))
-  (def VALUE ((liftP list->string) (at-least 1 NO-EOL)))
+  (def OPTIONAL (OPT (bracket #\[ (some1 NO-EOL) #\])))
+  (def VALUE (OPT (some1 NO-EOL)))
 #+end_src
 
   An affiliated keyword can appear more than once if KEY is either
@@ -287,7 +340,7 @@ Some things are optional.
   "CAPTION", "AUTHOR", "DATE" and "TITLE" keywords can contain objects
   in their value and their optional value, if applicable.
 
-* Greater Elements
+* STARTED Greater Elements
   :PROPERTIES:
   :CUSTOM_ID: Greater_Elements
   :END:
@@ -299,9 +352,10 @@ Some things are optional.
   - node properties, which can only be found in property drawers,
   - items, which can only be found in plain lists.
 
-** Greater Blocks
+** STARTED Greater Blocks
    :PROPERTIES:
    :CUSTOM_ID: Greater_Blocks
+   :header-args: :noweb-ref greater-blocks 
    :END:
 
    Greater blocks consist in the following pattern:
@@ -312,7 +366,19 @@ Some things are optional.
      ,#+END_NAME
    #+END_EXAMPLE
 
-   NAME can contain any non-whitespace character.
+#+begin_src gerbil
+ (def GREATER-BLOCK 
+    (.let* ((name BEGIN_NAME) (data (DATA name)) 
+                (value (CONTENTS name)) (_ SKIP-LINE))
+      [(string->symbol (string-append (string-downcase name) "-block"))
+       value: (string-trim-right value)])
+#+end_src
+   
+NAME can contain any non-whitespace character.
+
+#+begin_src gerbil :noweb-ref all-blocks
+  (def NAME ((liftP list->string) (many1 (sat (? (not char-whitespace?))))))
+#+end_src
 
    PARAMETERS can contain any character other than new line, and can
    be omitted.
@@ -320,16 +386,17 @@ Some things are optional.
    If NAME is "CENTER", it will be a "center block".  If it is
    "QUOTE", it will be a "quote block".
 
-   If the block is neither a center block, a quote block or a block
-   element, it will be a "special block".
+   If the block is neither a center block, a quote block or a [[#Blocks][block element]]
+    it will be a "special block".
 
    CONTENTS can contain any element, except : a line =#+END_NAME= on
    its own.  Also lines beginning with STARS must be quoted by
    a comma.
 
-** Drawers and Property Drawers
+** STARTED Drawers and Property Drawers
    :PROPERTIES:
    :CUSTOM_ID: Drawers
+   :header-args: :noweb-ref drawers-code
    :END:
 
    Pattern for drawers is:
@@ -343,7 +410,21 @@ Some things are optional.
    NAME can contain word-constituent characters, hyphens and
    underscores.
 
+#+begin_src gerbil
+  (def (DRAWER-DELIMITER p)
+    (bracket (.begin (skip WS) #\:) p (.begin #\: (skip WS) EOL)))
+
+  (def DRAWER-START
+    ((liftP list->string)
+     (DRAWER-DELIMITER
+      (many1 (.or (sat (? (or char-alphabetic? char-numeric?))) #\_ #\-)))))
+
+  (def DRAWER-END
+    (DRAWER-DELIMITER "END"))
+#+end_src
+
    CONTENTS can contain any element but another drawer.
+
 
 ** Dynamic Blocks
    :PROPERTIES:
@@ -453,7 +534,8 @@ Some things are optional.
       (item))))
    #+END_EXAMPLE
 
-** Property Drawers
+** DONE Property Drawers
+   CLOSED: [2019-11-07 Thu 11:30]
    :PROPERTIES:
    :CUSTOM_ID: Property_Drawers
    :END:
@@ -479,11 +561,27 @@ Some things are optional.
    :END:
    #+END_EXAMPLE
 
-   where CONTENTS consists of zero or more node properties.
+#+NAME: PROPERTYDRAWER
+  #+begin_src gerbil
+    (def PROPERTYDRAWER-START (DRAWER-DELIMITER (ci=? "PROPERTIES" #t)))
+    (def PROPERTYDRAWER-END DRAWER-END)
+
+    (def PROPERTYDRAWER
+      (bind (bracket PROPERTYDRAWER-START PROPERTYDRAWER-CONTENTS PROPERTYDRAWER-END)
+            (lambda (c) (return ['property-drawer [] . c]))))
+  #+end_src
+
+   CONTENTS consists of zero or more [[#Node_Properties][Node Properties]].
+
+#+NAME: PROPERTYDRAWER-CONTENTS
+#+begin_src gerbil
+    (def PROPERTYDRAWER-CONTENTS (some NODE-PROPERTY))
+#+end_src
 
 ** Tables
    :PROPERTIES:
    :CUSTOM_ID: Tables
+   :header-args: :noweb-ref table-parser
    :END:
 
    Tables start at lines beginning with either a vertical bar or the
@@ -493,6 +591,15 @@ Some things are optional.
 
    A table starting with a vertical bar has "org" type.  Otherwise it
    has "table.el" type.
+
+#+begin_src gerbil
+  (def TABLE-ELEMENT-ROW
+    (bracket (skip WS) TABLE-ROW (.begin (skip WS) EOL)))
+  (def TABLE
+    (.let* ((cb (point))(spaces (many WS)) (rows (many1 TABLE-ELEMENT-ROW))
+            (ce (point)) (formulas (.or (many1 TBLFM) #f)))
+      ['table [type: 'org spaces: spaces contents-begin: cb contents-end: ce contents: rows tblfm: formulas]]))
+#+end_src
 
    Org tables end at the first line not starting with a vertical bar.
    Table.el tables end at the first line not starting with either
@@ -504,6 +611,11 @@ Some things are optional.
    One or more "#+TBLFM: FORMULAS" lines, where "FORMULAS" can contain
    any character, can follow an org table.
 
+#+begin_src gerbil :noweb-ref table-fm
+  (def TBLFM (.begin (skip WS) "#+TBLFM: " (.read-line include-newline?: #f)))
+#+end_src
+
+*** TODO  Support table.el tables
 * Elements
   :PROPERTIES:
   :CUSTOM_ID: Elements
@@ -531,6 +643,7 @@ Some things are optional.
 ** Blocks
    :PROPERTIES:
    :CUSTOM_ID: Blocks
+   :header-args: :noweb-ref blocks-code
    :END:
 
    Like greater blocks, pattern for blocks is:
@@ -541,55 +654,109 @@ Some things are optional.
    ,#+END_NAME
    #+END_EXAMPLE
 
-   NAME cannot contain any whitespace character.
-
-#+begin_src gerbil 
-  (def NAME ((liftP list->string) (smug:map (sat (? (not char-whitespace?))))))
+#+begin_src gerbil
+  (def BLOCK 
+    (.let* ((name BEGIN_NAME) (data (DATA name)) 
+                (value (CONTENTS name)) (_ SKIP-LINE))
+      [(string->symbol (string-append (string-downcase name) "-block"))
+       value: (string-trim-right value)]))
 #+end_src
 
+   NAME cannot contain any whitespace character.
+
+
+#+begin_src gerbil 
+  (def NAME ((liftP list->string) (many1 (sat (? (not char-whitespace?))))))
+#+end_src
    If NAME is "COMMENT", it will be a "comment block".  If it is
    "EXAMPLE", it will be an "example block".  If it is "EXPORT", it
    will be an "export block".  If it is "SRC", it will be a "source
    block".  If it is "VERSE", it will be a "verse block".
 
 #+begin_src gerbil
+  (def BLOCK-ELEMENT-NAME (sat (cut member <> '("COMMENT" "EXAMPLE" "EXPORT" "SRC" "VERSE")
+                                    string-ci=?)))
   (def BEGIN_NAME
-    (smug:and (smug:string-ci=? "BEGIN_")
-              (sat (cut member <> '("COMMENT" "EXAMPLE" "EXPORT" "SRC" "VERSE") string-ci=?) NAME)))
+    (.begin (.string-ci=? "#+BEGIN_")
+              ))
+
+  (def (END_NAME name)
+    (.let* ((name (.begin (.string-ci=? "#+END_") (.string-ci=? name)))
+                (_ (peek (sat char-whitespace?))))
+       name))
+
 #+end_src
 
    CONTENTS can contain any character, including new lines. Though it will only
    contain Org objects if the block is a verse block. Otherwise, CONTENTS will
    not be parsed.
+
+#+begin_src gerbil
+  (def (CONTENTS name)
+    (let lines ((ls []))
+      (.let* (l (.or (.begin (END_NAME name) (return #t))
+                             (.read-line)))
+                 (if (eq? #t l)
+                   (return (string-concatenate (reverse! ls)))
+                   (lines (cons l ls))))))
+#+end_src
    
-   DATA can contain any character but a new line.  It can be ommitted,
+   DATA can contain any character but a new line.  It can be omitted,
    unless the block is either a "source block" or an "export block".
+
+#+begin_src gerbil
+  (def (DATA name)
+    (case (string->symbol (string-downcase name))
+      ((export) EXPORT-DATA)
+      ((src) SRC-DATA)
+      (else (.read-line))))
+#+end_src
 
    In the latter case, it should be constituted of a single word.
 
-*** Source Block
-    :PROPERTIES:
-    :CUSTOM_ID: Source_Block
-    :END:
+#+begin_src gerbil 
+  (def EXPORT-DATA (.let* ((_ (skip WS))
+                              (type ((liftP list->string)
+                                     (many1 (sat (? (not char-whitespace?))))))
+                              (_ SKIP-LINE))
+                     type))
+#+end_src
+   
+   In the former case, it must follow the pattern "LANGUAGE SWITCHES
+   PARAMETERS", where SWITCHES and PARAMETERS are optional.
 
-    In the former case, it must follow the pattern "LANGUAGE SWITCHES
-    ARGUMENTS", where SWITCHES and ARGUMENTS are optional.
+#+begin_src gerbil
+  (def SRC-DATA 
+   (.let* ((_ (skip WS)) (l LANGUAGE)
+               (_ (skip WS)) (s (OPT SWITCHES))
+               (_ (skip WS)) (p (OPT PARAMETERS)) (_ SKIP-LINE))
+     [language: l switches: s parameters: p]))
+#+end_src
 
-    LANGUAGE cannot contain any whitespace character.
+   LANGUAGE cannot contain any whitespace character.
 
-#+name: LANGUAGE
 #+begin_src gerbil
   (def LANGUAGE
-    ((liftP list->string) (smug:map (satisfies-not char-whitespace?))))
+    ((liftP list->string) (many (sat (? (not char-whitespace?))))))
 #+end_src
 
     SWITCHES is made of any number of "SWITCH" patterns, separated by
-    blank lin
+    blanks.
 
-
-#+name: SWITCH
 #+begin_src gerbil
-  (def SWITCH (smug:let* ((sign (smug:or #\+ #\-)) (letter (sat char-alphabetic?)))
+  (def SWITCHES
+    (.or (sepby1
+              (.or SWITCH-r
+                              SWITCH-l
+                              SWITCH-n
+                              SWITCH-i)
+              (skip WS))
+             (return #f)))
+
+#+end_src
+
+#+begin_src gerbil
+  (def SWITCH (.let* ((sign (.or #\+ #\-)) (letter (sat char-alphabetic?)))
                 (values sign letter)))
 #+end_src
  
@@ -600,22 +767,23 @@ Some things are optional.
 
           #+begin_src gerbil
             (def SWITCH-n
-              (smug:let* (((values sign letter) SWITCH)
+              (.let* (((values sign letter) SWITCH)
                           (arg (if (not (char=? #\n letter)) (fail)
-                                   (OPT (smug:and " " (skip WS)
-                                                  ((liftP (lambda (lst) (string->number (list->string lst))))
+                                   (OPT (.begin " " (skip WS)
+                                                  ((liftP (lambda (lst)
+                                                            (string->number (list->string lst))))
                                                    (at-least 1 (sat char-numeric?))))))))
-                ['switch letter: letter sign: sign arg: arg]))
-
+                         ['switch letter: letter sign: sign arg: arg]))
           #+end_src
 
   - -r :: "You can also add a ‘-r’ switch which removes the labels from the
           source code[fn:ol]"
 
   - -i :: "preserve the indentation of a specific code block[fn:ol]"
+
           #+begin_src gerbil
             (def (SWITCH-char char)
-              (smug:let* (((values s l) SWITCH))
+              (.let* (((values s l) SWITCH))
                (if (and (char=? l char) (char=? #\- s))
                  ['switch letter: l sign: s])))
 
@@ -630,29 +798,37 @@ Some things are optional.
 
           FORMAT can contain any character but a double quote and a new line
 
-#+begin_src gerbil
+        #+begin_src gerbil
   (def FORMAT
-    (smug:and #\"
-              (smug:begin0 ((liftP list->string)
-                            (smug:map (sat (? (not (cut member <> '(#\" #\newline)))))))
+    (.begin #\"
+              (.begin0 ((liftP list->string)
+                            (many (sat (? (not (cut member <> '(#\" #\newline)))))))
                            #\")))
 
   (def SWITCH-l
-    (smug:let* (((values sign letter) SWITCH)
+    (.let* (((values sign letter) SWITCH)
                 (format (if (not (char=? #\l letter)) (fail)
-                         (OPT (smug:and " " (skip WS)
+                         (OPT (.begin " " (skip WS)
                                         FORMAT)))))
                (return ['switch letter: letter sign: sign arg: format])))
-
-
 #+end_src
    
-    ARGUMENTS can contain any character but a new line.
+    PARAMETERS can contain any character but a new line.
+    
+#+begin_src gerbil
+    (def PARAMETERS
+      (.or 
+       ((liftP list->string) (many1 (sat (? (not (cut char=? #\newline))))))
+       (return #f)))
+#+end_src
 
-
-** Clock, Diary Sexp and Planning
+** STARTED Clock, Diary Sexp and Planning
+   DEADLINE: <2019-11-06 Wed> SCHEDULED: <2019-11-05 Tue>
    :PROPERTIES:
    :CUSTOM_ID: Clock,_Diary_Sexp_and_Planning
+   :END:
+   :LOGBOOK:
+   CLOCK: [2019-11-05 Tue 13:11]--[2019-11-05 Tue 13:11] =>  0:00
    :END:
 
    A clock follows either of the patterns below:
@@ -683,8 +859,19 @@ Some things are optional.
    HEADLINE
    PLANNING
    #+END_EXAMPLE
-
-   where HEADLINE is a headline element and PLANNING is a line filled
+   
+    #+NAME: PLANNING
+   #+begin_src gerbil 
+      (def (PLANNING (ts TIMESTAMP))
+        (def plan (.let* ((k PLANNING-KEYWORD)
+                          (t (.begin (skip WS) ts)))
+                    [(string->keyword (string-downcase k))  t]))
+        (.let* ((plans (many1 plan))
+                (_ (.begin (skip WS) EOL)))
+          (apply append plans)))
+   #+end_src
+   
+   HEADLINE is a headline element and PLANNING is a line filled
    with INFO parts, where each of them follows the pattern:
 
    #+BEGIN_EXAMPLE
@@ -693,6 +880,14 @@ Some things are optional.
 
    KEYWORD is either "DEADLINE", "SCHEDULED" or "CLOSED".  TIMESTAMP
    is a timestamp object.
+
+#+NAME: PLANNING-KEYWORD 
+#+begin_src gerbil
+  (def PLANNING-KEYWORD
+    (bracket (skip WS)
+             (.or (ci=? "DEADLINE") (ci=? "SCHEDULED") (ci=? "CLOSED"))
+             ": "))
+#+end_src
 
    In particular, no blank line is allowed between PLANNING and
    HEADLINE.
@@ -783,6 +978,14 @@ Some things are optional.
 
    VALUE can contain anything but a newline character.
 
+#+NAME: node-property
+#+begin_src gerbil 
+  (def NODE-PROPERTY
+    (.let* ((k (bracket (.begin (skip WS) #\:) (some1 (sat (? (not char-whitespace?)))) #\:))
+            (v (bracket (skip WS) (some (sat (? (not (cut char=? <> #\newline))))) EOL)))
+     ['node-property [key: (list->string k) value: (list->string v)]]))
+#+end_src
+
 ** Paragraphs
    :PROPERTIES:
    :CUSTOM_ID: Paragraphs
@@ -803,8 +1006,26 @@ Some things are optional.
    A table rows is either constituted of a vertical bar and any number
    of table cells or a vertical bar followed by a hyphen.
 
+   | table row | the next is rule |
+   |-----------+------------------|
+
    In the first case the table row has the "standard" type.  In the
    second case, it has the "rule" type.
+
+    #+begin_src gerbil :noweb-ref table-row
+      (def RULE-CELL
+        (.let* ((contents (many #\-)) (end (.or #\+ #\|)))
+               ['table-cell [type: 'rule contents: (list->string contents)]]))
+
+      (def RULE-ROW
+        (.let* (c (.begin #\| (peek #\-) (many1 RULE-CELL)))
+          ['table-row [type: 'rule contents: c]]))
+
+      (def TABLE-ROW
+       (.or RULE-ROW
+            (.let* (cs (.begin "|" (many TABLE-CELL)))
+              ['table-row [type: 'standard contents: cs]])))
+    #+end_src
 
    Table rows can only exist in tables.
 
@@ -1146,20 +1367,27 @@ Some things are optional.
    Table cells follow the pattern:
 
    #+BEGIN_EXAMPLE
-   CONTENTS SPACES|
+   CONTENTS SPACES| 
    #+END_EXAMPLE
 
-   CONTENTS can contain any character excepted a vertical bar.
+   | CONTENTS | can contain any character excepted a vertical bar and newline.                                        |
+   | SPACES   | contains any number of space characters, including zero.  It can be used to align properly the table. |
+   | FINAL    | The final bar may be replaced with a newline character for the last cell in row.                      |
 
-   SPACES contains any number of space characters, including zero.  It
-   can be used to align properly the table.
+#+begin_src gerbil :noweb-ref table-cells
+  (def CONTENTS (some1 (sat (? (not (cut member <> '(#\| #\newline)))))))
+  (def FINAL (.or #\| (peek #\newline) (.not (item))))
+  (def SPACES (.or (.begin0 (many1 #\space) FINAL) (.begin FINAL (return []))))
 
-   The final bar may be replaced with a newline character for the last
-   cell in row.
+  (def TABLE-CELL
+    (.let* ((contents CONTENTS) (spaces SPACES))
+      ['table-cell [contents: (list->string contents) spaces: spaces]]))
+#+end_src
 
 ** Timestamps
    :PROPERTIES:
-   :CUSTOM_ID: Timestamp
+   :CUSTOM_ID: Timestamps
+   :header-args: :noweb-ref timestamp-code
    :END:
 
    There are seven possible patterns for timestamps:
@@ -1174,7 +1402,49 @@ Some things are optional.
    [DATE TIME-TIME REPEATER-OR-DELAY]                             (inactive range)
    #+END_EXAMPLE
 
-   SEXP can contain any character excepted ~>~ and ~\n~.
+   There can be two REPEATER-OR-DELAY in the timestamp: one as a repeater and
+   one as a warning delay. "[T]he repeater should come first and the warning
+   period last"[fn:omtr]
+
+<2001-01-01 20:00 --2h -3d>--<2002-02-02 +3m --4y>
+
+
+
+#+begin_src gerbil :noweb-ref TIMESTAMP
+  (def INNER-TIMESTAMP
+    (.let* ((d DATE)
+            (start (OPT (.begin " " (skip WS) TIME)))
+            (end (OPT (.begin "-" TIME)))
+            (rep (OPT (.begin " " (skip WS) REPEATER-OR-DELAY)))
+            (wa (OPT (.begin " " (skip WS) REPEATER-OR-DELAY))))
+      ['inner-timestamp [date: d start: start end: end repeat: rep warn: wa]]))
+
+  (def TIMESTAMP
+    (.let* ((b (.or #\[ #\<))
+            (ts INNER-TIMESTAMP)
+            (e (if (char=? #\[ b) #\] #\>))
+            (range (OPT (.begin "--" (peek b) TIMESTAMP))))
+    ['timestamp [start: b inner: ts range: range]]))
+#+end_src
+
+   SEXP can contain any character excepted ~>~ and ~\n~. 
+
+      #+begin_src gerbil
+        (def SEXP (some1 (sat (? (not (cut string-any <> ">\n"))))))
+
+        (def TIMESTAMP-SEXP
+          (.let* (sexp (.list->string (bracket "<%%(" SEXP ")>")))
+            (string-append "(" sexp ")")))
+
+      #+end_src
+
+   The Org date format is inspired by the standard ISO 8601 date/time
+   format. The DAYNAME is optional when you type the date yourself. However, any
+   date inserted or modified by Org adds that day name.
+
+   #+begin_src gerbil
+     (def NUM (sat char-numeric?))
+   #+end_src
 
    DATE follows the pattern:
 
@@ -1185,8 +1455,32 @@ Some things are optional.
    ~Y~, ~M~ and ~D~ are digits.  DAYNAME can contain any non
    whitespace-character besides ~+~, ~-~, ~]~, ~>~, a digit or ~\n~.
 
+   #+begin_src gerbil
+     (def DAYNAME
+       (.let* (_ (skip WS))
+        (.list->string (many1 (sat (? (not (or char-numeric? (cut string-any <> " +-]>\n")))))))))
+
+     (def DATE
+       (.let* ((y (.string->number (.make-string 4 NUM))) (_ #\-)
+               (m (.string->number (.make-string 2 NUM))) (_ #\-)
+               (d (.string->number (.make-string 2 NUM)))
+               (n (OPT DAYNAME)))
+       ['date [y: y m: m d: d n: n]]))
+
+   #+end_src
+
+   It does seem that everything after DATE is optional.
+
    TIME follows the pattern ~H:MM~.  ~H~ can be one or two digit long
    and can start with 0.
+
+#+begin_src gerbil
+  (def TIME
+    (.let* ((h (.string->number
+                (.list->string (.cons NUM (.or (.list NUM) (return []))))))
+            (m (.begin #\: (.string->number (.make-string 2 NUM)))))
+     ['time [h: h m: m]]))
+#+end_src
 
    REPEATER-OR-DELAY follows the pattern:
 
@@ -1194,19 +1488,38 @@ Some things are optional.
    MARK VALUE UNIT
    #+END_EXAMPLE
 
+#+begin_src gerbil :noweb-ref REPEATER-OR-DELAY
+  (def REPEATER-OR-DELAY
+    (.let* ((m MARK) (v VALUE) (u UNIT)) ['repeater-or-delay [m: m v: v u: u]]))
+#+end_src
+
    MARK is ~+~ (cumulate type), ~++~ (catch-up type) or ~.+~ (restart
    type) for a repeater, and ~-~ (all type) or ~--~ (first type) for
    warning delays.
 
+#+begin_src gerbil
+  (def MARK (.or "++" "+" ".+" "--" "-"))
+#+end_src
+
    VALUE is a number.
+
+#+begin_src gerbil
+  (def VALUE (.string->number (.list->string (many1 NUM))))
+#+end_src
 
    UNIT is a character among ~h~ (hour), ~d~ (day), ~w~ (week), ~m~
    (month), ~y~ (year).
 
+#+begin_src gerbil
+  (def UNIT (sat (cut string-any <> "hdwmy")))
+#+end_src
+
    MARK, VALUE and UNIT are not separated by whitespace characters.
 
-   There can be two REPEATER-OR-DELAY in the timestamp: one as
-   a repeater and one as a warning delay.
+
+
+  
+*** Some testing elements
 
 ** Text Markup
    :PROPERTIES:
@@ -1262,6 +1575,110 @@ Some things are optional.
    #+END_QUOTE
 
 
+* STARTED /File/ syntax.ss
+
+#+begin_src gerbil :noweb yes :tangle "syntax.ss"
+  (import :drewc/smug :std/srfi/13 :std/srfi/1
+          :drewc/org/environment)
+  (export (import: <global>) (import: <headline>)
+          (import: <affiliated-keywords>) (import: <timestamp>)
+          (import: <tables>) (import: <planning>)
+          (import: <drawers>) (import: <property-drawers>))
+
+  (module <global>
+    (export #t)
+    <<ANY-STRING>>
+    <<global>>)
+  (import <global>)
+
+  ;; * Objects
+
+  (module <timestamp>
+    (import <global>)
+    (export TIMESTAMP)
+    <<timestamp-code>>
+    <<REPEATER-OR-DELAY>>
+    <<TIMESTAMP>>)
+  (import <timestamp>)
+
+ ;; ** Planning
+
+  (module <planning> 
+    (import <timestamp>)
+    (export PLANNING-KEYWORD PLANNING)
+    <<PLANNING-KEYWORD>>
+    <<PLANNING>>)
+  (import <planning>)
+
+  ;; * Headlines and Sections
+  (module <headline>
+    (import <global>)
+    (export HEADLINE HEADLINE-ELEMENT STARS STARS-ONLY)
+    <<headlines-and-sections>>
+    <<headline>>)
+  (import <headline>)
+
+  ;; * Affiliated Keywords
+
+  (module <affiliated-keywords>
+     (import <global>)
+     (export AFFILIATED-KEYWORD
+             (rename: KEY AFFILIATED-KEY))
+     <<affiliated-keywords>>
+     <<afk>>)
+  (import <affiliated-keywords>)
+
+  ;; * Greater Elements
+
+  ;; ** Tables
+
+  (module <tables>
+    (import <global>)
+    (export TABLE TBLFM)
+    <<table-cells>>
+    <<table-row>>
+    <<table-fm>>
+    <<table-parser>>)
+  (import <tables>)
+
+  ;; ** Drawers and Property Drawers
+
+  (module <drawers>
+    (import <global>)
+     (export DRAWER-DELIMITER DRAWER-START DRAWER-END)
+      <<drawers-code>>)
+  (import <drawers>)
+
+  (module <property-drawers> 
+    (import <global> <drawers>)++
+    (export PROPERTYDRAWER PROPERTYDRAWER-START PROPERTYDRAWER-CONTENTS PROPERTYDRAWER-END)
+    <<node-property>>
+    <<PROPERTYDRAWER-CONTENTS>>
+    <<PROPERTYDRAWER>>)
+  (import <property-drawers>)
+
+
+  ;; Greater Blocks
+
+  (module <all-blocks>
+    (export #t)
+    <<all-blocks>>)
+
+  ;; * Elements
+
+  ;; ** Blocks 
+  (module <block> 
+  (import <global>)
+    (export BLOCK)
+    <<blocks-code>>)
+  (import <block>)
+
+ 
+
+  
+
+
+#+end_src
 * Copyright
 
 Documentation from the orgmode.org/worg/ website (either in its HTML format or
@@ -1287,6 +1704,9 @@ Copyright (C) 2019 Drew Crampsie.
 
 * Footnotes
 
+[fn:omtr] Org Manual - Repeated Tasks
+ https://orgmode.org/manual/Repeated-tasks.html#Repeated-tasks
+
 [fn:ol] Org Manual - Literal Examples
 https://orgmode.org/manual/Literal-Examples.html#Literal-Examples
 
@@ -1306,3 +1726,4 @@ top-down from there until context around original location is found.
 # Local Variables:
 # sentence-end-double-space: t
 # End:
+

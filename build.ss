@@ -4,4 +4,4 @@
 (import :std/build-script)
 
 (defbuild-script
-  '("environment"))
+  '("environment" "syntax" "location" "element"))
