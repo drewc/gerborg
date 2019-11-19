@@ -53,7 +53,7 @@ Unless specified otherwise, case is not significant.
   parsing", ~EOF~ is shorter and sweeter.
 
 #+begin_src gerbil
-  (def EOF (.not (item)))
+  (def EOF (.begin (.not (item)) (return #!eof)))
 #+end_src
 
 ** Whitespace
@@ -70,8 +70,8 @@ Unless specified otherwise, case is not significant.
 
 #+begin_src gerbil
   (def BOL
-    (.let* (p (point)) (if (zero? p) (return #t)
-                           (peek (.begin (goto-char (- p 1)) #\newline)))))
+    (.let* (p (point))
+      (if (zero? p) (return #t) (peek (.begin (goto-char (- p 1)) #\newline)))))
 #+end_src
  
 We often want to know if it's the end of line. But, the EOF is also EOL.
@@ -129,7 +129,7 @@ We often want to know if it's the end of line. But, the EOF is also EOL.
                                        (.begin EOL #f))))
         ['headline (list stars: s todo-keyword: k priority: p
                          title: (list->string title) tags: tags
-                         commented?2: c footnote-section?: (footnote-section? title)
+                         commented?: c footnote-section?: (footnote-section? title)
                          archived?: (archived? tags))]))
   #+end_src
   
@@ -616,7 +616,7 @@ NAME can contain any non-whitespace character.
 #+end_src
 
 *** TODO  Support table.el tables
-* Elements
+* STARTED Elements
   :PROPERTIES:
   :CUSTOM_ID: Elements
   :END:
@@ -1521,9 +1521,10 @@ NAME can contain any non-whitespace character.
   
 *** Some testing elements
 
-** Text Markup
+** STARTED Text Markup
    :PROPERTIES:
    :CUSTOM_ID: Emphasis_Markers
+   :header-args: :noweb-ref emphasis-markers
    :END:
 
    Text markup follows the pattern:
@@ -1532,34 +1533,91 @@ NAME can contain any non-whitespace character.
    PRE MARKER CONTENTS MARKER POST
    #+END_EXAMPLE
 
+   PRE, MARKER, CONTENTS, MARKER and POST are not separated by
+   whitespace characters.
+
+  #+begin_src gerbil :noweb-ref TEXT-MARKUP
+    (def TEXT-MARKUP
+      (.let* ((b (point))
+              (_ (save-excursion (goto-char (1- b)) (.or (.not (item)) PRE)))
+              ((values marker type) MARKER) 
+              (cb (point)) (contents CONTENTS) (ce (point))
+
+              (pb (.begin (.char=? marker) (peek (.or POST (.not (item))))
+                          (skip-chars-forward " \t")))
+              (end (point)))
+        (cons* type (append [begin: b end: end]
+                            (if (member type '(code verbatim)) 
+                              [value: (list->string contents)]
+                              [contents-begin: cb contents-end: ce])
+                            [post-blank: pb])
+               (if (member type '(code verbatim)) []
+                   [(list->string contents)]))))
+  #+end_src
+
    PRE is a whitespace character, ~(~, ~{~ ~'~ or a double quote.  It
    can also be a beginning of line.
+
+   #+begin_src gerbil 
+     (def PRE (.or (sat (? (or (cut memv <> '(#\{ #\( #\' #\"))))) WS BOL))
+   #+end_src
 
    MARKER is a character among ~*~ (bold), ~=~ (verbatim), ~/~
    (italic), ~+~ (strike-through), ~_~ (underline), ~~~ (code).
 
-   CONTENTS is a string following the pattern:
+   #+begin_src gerbil
+     (def (M c s) (.begin (.char=? c) (return (values c s))))
+     (def MARKER (.or (M #\* 'bold) (M #\= 'verbatim)
+                      (M #\/ 'italic) (M #\+ 'strike-through)
+                      (M #\_ 'underline) (M #\~ 'code)))
+   #+end_src
 
+   CONTENTS is a string following the pattern:
+  
    #+BEGIN_EXAMPLE
    BORDER BODY BORDER
    #+END_EXAMPLE
 
-   BORDER can be any non-whitespace character excepted ~,~, ~'~ or
-   a double quote.
-
+   BORDER can be any non-whitespace character.
+  ooi
+   #+begin_src gerbil
+     (def BORDER (sat (? (not char-whitespace?))))
+   #+end_src
+   
    BODY can contain contain any character but may not span over more
    than 3 lines.
 
-   BORDER and BODY are not separated by whitespaces.
+   #+begin_src gerbil
+     (def BODY
+       (sat (lambda (cs) (> 2 (count (cut char=? #\newline <>) cs)))
+            (some1 (item))))
 
+   #+end_src
+   
+   BORDER and BODY are not separated by whitespaces.
+   
    CONTENTS can contain any object encountered in a paragraph when
    markup is "bold", "italic", "strike-through" or "underline".
 
+   CONTENTS can be anything within "code" and "verbatim" emphasis, by
+   definition. Regardless, it's a string.
+
+   #+begin_src gerbil
+     (def CONTENTS
+       (.let* ((bb BORDER) (b BODY) (be BORDER))
+         (set! (cdr (last-pair b)) [be])
+         (cons bb b)))
+   #+end_src
+
    POST is a whitespace character, ~-~, ~.~, ~,~, ~:~, ~!~, ~?~, ~'~,
    ~)~, ~}~ or a double quote.  It can also be an end of line.
+   #+begin_src gerbil
+     (def POST (.or (sat (cut string-any <> " -,.:!?')}\""))
+                    (peek #\newline)))
 
-   PRE, MARKER, CONTENTS, MARKER and POST are not separated by
-   whitespace characters.
+   #+end_src
+   
+
 
    #+ATTR_ASCII: :width 5
    -----
@@ -1583,7 +1641,7 @@ NAME can contain any non-whitespace character.
   (export (import: <global>) (import: <headline>)
           (import: <affiliated-keywords>) (import: <timestamp>)
           (import: <tables>) (import: <planning>)
-          (import: <drawers>) (import: <property-drawers>))
+          (import: <drawers>) (import: <property-drawers>) (import: <emphasis>))
 
   (module <global>
     (export #t)
@@ -1600,6 +1658,13 @@ NAME can contain any non-whitespace character.
     <<REPEATER-OR-DELAY>>
     <<TIMESTAMP>>)
   (import <timestamp>)
+
+  (module <emphasis>
+    (import <global>)
+    (export TEXT-MARKUP)
+    <<emphasis-markers>>
+    <<TEXT-MARKUP>>)
+  (import <emphasis>)
 
  ;; ** Planning
 

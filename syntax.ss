@@ -3,17 +3,17 @@
  (export (import: <global>) (import: <headline>)
          (import: <affiliated-keywords>) (import: <timestamp>)
          (import: <tables>) (import: <planning>)
-         (import: <drawers>) (import: <property-drawers>))
+         (import: <drawers>) (import: <property-drawers>) (import: <emphasis>))
 
  (module <global>
    (export #t)
    (def (ANY-STRING . strings)
      (apply .or (map (cut .string-ci=? <>) strings)))
-   (def EOF (.not (item)))
+   (def EOF (.begin (.not (item)) (return #!eof)))
    (def WS (sat (? (and char-whitespace? (not (cut char=? #\newline <>))))))
    (def BOL
-     (.let* (p (point)) (if (zero? p) (return #t)
-                            (peek (.begin (goto-char (- p 1)) #\newline)))))
+     (.let* (p (point))
+       (if (zero? p) (return #t) (peek (.begin (goto-char (- p 1)) #\newline)))))
    (def EOL (.or #\newline EOF))
    (def SKIP-LINE
      (let (S (sat (? (not (cut char=? <> #\newline)))))
@@ -72,6 +72,44 @@
      ['timestamp [start: b inner: ts range: range]])))
  (import <timestamp>)
 
+ (module <emphasis>
+   (import <global>)
+   (export TEXT-MARKUP)
+   (def PRE (.or (sat (? (or (cut memv <> '(#\{ #\( #\' #\"))))) WS BOL))
+   (def (M c s) (.begin (.char=? c) (return (values c s))))
+   (def MARKER (.or (M #\* 'bold) (M #\= 'verbatim)
+                    (M #\/ 'italic) (M #\+ 'strike-through)
+                    (M #\_ 'underline) (M #\~ 'code)))
+   (def BORDER (sat (? (not char-whitespace?))))
+   (def BODY
+     (sat (lambda (cs) (> 2 (count (cut char=? #\newline <>) cs)))
+          (some1 (item))))
+   
+   (def CONTENTS
+     (.let* ((bb BORDER) (b BODY) (be BORDER))
+       (set! (cdr (last-pair b)) [be])
+       (cons bb b)))
+   (def POST (.or (sat (cut string-any <> " -,.:!?')}\""))
+                  (peek #\newline)))
+   
+   (def TEXT-MARKUP
+     (.let* ((b (point))
+             (_ (save-excursion (goto-char (1- b)) (.or (.not (item)) PRE)))
+             ((values marker type) MARKER) 
+             (cb (point)) (contents CONTENTS) (ce (point))
+   
+             (pb (.begin (.char=? marker) (peek (.or POST (.not (item))))
+                         (skip-chars-forward " \t")))
+             (end (point)))
+       (cons* type (append [begin: b end: end]
+                           (if (member type '(code verbatim)) 
+                             [value: (list->string contents)]
+                             [contents-begin: cb contents-end: ce])
+                           [post-blank: pb])
+              (if (member type '(code verbatim)) []
+                  [(list->string contents)])))))
+ (import <emphasis>)
+
 ;; ** Planning
 
  (module <planning> 
@@ -125,7 +163,7 @@
                                       (.begin EOL #f))))
        ['headline (list stars: s todo-keyword: k priority: p
                         title: (list->string title) tags: tags
-                        commented?2: c footnote-section?: (footnote-section? title)
+                        commented?: c footnote-section?: (footnote-section? title)
                         archived?: (archived? tags))])))
  (import <headline>)
 

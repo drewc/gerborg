@@ -3,7 +3,7 @@
 #+EMAIL:      mail@nicolasgoaziou.fr
 #+STARTUP:    align fold nodlcheck hidestars oddeven lognotestate
 #+SEQ_TODO:   TODO(t) INPROGRESS(i) WAITING(w@) | DONE(d) CANCELED(c@)
-#+TAGS:       Write(w) Update(u) Fix(f) Check(c) NEW(n) Object(o) Element(e) GreaterElement(g)
+#+TAGS:       Write(w) Update(u) Fix(f) Check(c) NEW(n) Object(o) Element(e) GreaterElement(g) RecursiveObject(r)
 #+LANGUAGE:   en
 #+PRIORITIES: A C B
 #+CATEGORY:   worg
@@ -106,9 +106,17 @@ Possible types are defined in `all-elements'.
         (underline ,@standard-set)
         (verse-block ,@standard-set))))
 
-  (def (org-element-restriction el)
+  (def (org-element-object-restrictions el)
     (cdr (assq (if (symbol? el) el (org-element-type el)) object-restrictions)))
 
+   ;; "List of recursive object types."
+
+  (def recursive-objects
+   '(bold footnote-reference italic link subscript radio-target strike-through
+     superscript table-cell underline))
+
+  (def (org-element-recursive-object? el)
+    (and (memq (if (symbol? el) el (car el)) recursive-objects)  #t))
 #+end_src
 
 
@@ -208,126 +216,201 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 
 [[file:~/.emacs.d/elpa/org-plus-contrib-20190408/org-element.el::(defun%20org-element--parse-elements][el --parse-elements]]
 
+*** INPROGRESS /Parser/ parse-elements 
+ #+begin_src gerbil
+   (def (parse-buffer str (granularity 'object))
+     (run (parse-elements 0 (string-length str) 'first-section #f granularity ['org-data []])
+          str))
+
+   (defsyntax (nest stx)
+     (syntax-case stx ()
+       ((_ outer ... inner)
+        (foldr (lambda (outer-form inner-form)
+                 (with-syntax (((o ...) outer-form)
+                               (i inner-form))
+                   #'(o ... i)))
+               #'inner
+               #'(outer ...)))))
+
+   (def (parse-elements
+         (beg 0) (end +inf.0) (mode #f) (structure #f)
+         (granularity #f) (acc #f))
+
+     (def (parse-greater-element-contents? el (type (org-element-type el)))
+       ;;Make sure ~granularity~ allows the recursion, or
+       ;; ~element~ is a headline, in which case going inside is
+       ;; mandatory, in order to get sub-level headings.
+       (and (org-greater-element? el)
+            (or (memq granularity '(element object #f))
+                (and (eq? granularity 'greater-element)
+                     (eq? type 'section))
+                (eq? type 'headline))))
+     (def elements [])
+     (def (ret)
+       elements)
+
+     (.begin
+       (goto-char beg)
+       (narrow-to-region beg end)
+       ;; When parsing only headlines, skip any text before first one.
+       (if (eq? granularity 'headline)
+         (.begin (some SKIP-LINE) ORG-AT-HEADING)
+         #f)
+       ;;  ;; Find current element's type and parse it accordingly to
+       ;;  ;; its category.
+       (.let*
+           (els
+            (nest
+             (let ((elements [])
+                   (next-element (parse-current-element granularity mode structure))))
+             (let parse-element ((p next-element))
+               (nest (.let* (el (.or p #f)))
+                     (if (not el) (return (reverse! elements)))
+                     (let* ((next next-element)
+                            ;; Paragraph return VALUES
+                            (el (if (org-element? el) el
+                                    (match el ((values nel n)
+                                               (when n (set! next (return n)))
+                                               nel))))
+                            (type (org-element-type el))
+                            (cbeg (org-element-property contents-begin: el))
+                            (cend (org-element-property contents-end: el)))
+                       (displayln el)
+                       (push! el elements) )
+                     (.let* (contents 
+                             (cond
+                              ;; If element has no contents, don't modify it.
+                              ((not cbeg) #f)
+                              ;; ;; If we already have contents, We're almost done.
+                              ((org-element-contents el) => (cut return <>))
+
+                              ;; Fill ~element~ contents by side-effect. Greater
+                              ;; element: parse between contents-begin: and
+                              ;; contents-end:
+                              ((parse-greater-element-contents? el)
+                               (.begin (parse-elements
+                                        cbeg cend ;; Possibly switch to a special mode.
+                                        (next-mode type #t)
+                                        (and (memq type '(item plain-list))
+                                             (org-element-property structure: el))
+                                        granularity el)
+                                       (return (org-element-contents el))))
+
+                              ;; It's an element or object that has contents, which
+                              ;; are objects. So, parse them if allowed.
+                              ((memq granularity '(object #f))
+                               (displayln "Parsing objects " cbeg "-" cend " for " type)
+                               (parse-objects cbeg cend el
+                                              (org-element-object-restrictions el))
+                               )
+
+
+                              (#t (return #f))))
+                        ;; (when contents
+                        ;;   (for (child contents)
+                            ;(set! (org-element-property parent: child) el)))
+                       (.begin (goto-char (org-element-property end: el))
+                               (parse-element next)))))))
+         (.begin (widen)
+                 (if (not acc) (return els)
+                     (begin0 (return acc) (set! (org-element-contents acc) els)))))))
+
+ #+end_src
+
+*** /Parser/ ~parse-objects~
+
 #+begin_src gerbil
-  (def (parse-buffer str (granularity 'object))
-    (run (parse-elements 0 (string-length str) 'first-section #f granularity ['org-data []])
-         str))
+    ;; Return either values of the string that comes before the object and the next
+    ;; object, or #f. ~restriction~ is a list of object types, as symbols, that
+    ;; should be looked after.
 
+  (def (object-lex restrictions)
+    (def (obj? name parser)
+      (if (not (memq name restrictions)) (fail)
+          parser))
 
-  (def (parse-elements
-        (beg 0) (end +inf.0) (mode #f) (structure #f)
-        (granularity #f) (acc #f))
-    (def elements [])
+    (def lex-objs
+      (.or (obj? 'code (code-parser))
+           (obj? 'bold (bold-parser))
+           (obj? 'italic (italic-parser))
+           (obj? 'verbatim (verbatim-parser))
+           (obj? 'strike-through (strike-through-parser))
+           (obj? 'timestamp (timestamp-parser))))
 
-    (def (parse-greater-element-contents? el (type (org-element-type el)))
-      ;;Make sure ~granularity~ allows the recursion, or
-      ;; ~element~ is a headline, in which case going inside is
-      ;; mandatory, in order to get sub-level headings.
-      (and (org-greater-element? type)
-           (or (memq granularity '(element object #f))
-               (and (eq? granularity 'greater-element)
-                    (eq? type 'section))
-               (eq? type 'headline))))
+      (.let* ((lst (some (item)))
+              (obj (.or lex-objs
+                        ;; if the list is not null, but we're at the end of the
+                        ;; line, return #f for the object
+                        (.begin (sat (lambda _ (not (null? lst))) (.not (item))) #f))))
+             (values (list->string lst) obj)))
 
-    (.begin 
-     (goto-char beg)
-     (narrow-to-region beg end)
-     ;; When parsing only headlines, skip any text before first one.
-      (if (eq? granularity 'headline)
-        (.begin (some SKIP-LINE) ORG-AT-HEADING)
-        #f)
-    ;;  ;; Find current element's type and parse it accordingly to
-      ;;  ;; its category.
-      (let parse-element ((el (parse-current-element granularity mode structure)))
-        (.let*
-         (el el)
-         (push! elements el)
-          (let ((type (org-element-type el))
-          (cbeg (org-element-property contents-begin: el)))
+  (def (parse-objects (beg 0) (end +inf.0) (acc #f) (restriction all-objects) (parent #f))
+    (def (lexes->contents lexs)
+      (def contents [])
+      (let lp ((ls lexs))
+        (if (null? ls) (return (reverse! contents))
+          (let ((values str obj) (car ls))
+            (unless (string-null? str) (push! str contents))
+            (cond
+             ((not obj) (lp (cdr ls)))
+             (#t  
+              (push! obj contents)
+              (let ((obj-end (org-element-property end: obj))
+                    (cont-beg (org-element-property contents-begin: obj)))
+                ;; Fill contents of ~object~ if needed
+                  (.begin
+                    (if (and (org-element-recursive-object? obj)
+                             cont-beg)
+                      (parse-objects cont-beg (org-element-property contents-end: obj)
+                                     obj (org-element-object-restrictions obj))
+                      #t)
+                    (lp (cdr ls))))))))))
 
-      (cond
-       ;; If element has no contents, don't modify it.
-       ((not cbeg) (goto-char (org-element-property end: el)))
-       ;; If we already have contents, just set the parent.
-       ((org-element-contents el) =>
-        (cut map
-          (lambda (child) (set! (org-element-property parent: child) el)) <>))
+    (.begin
+      (narrow-to-region beg end)
+      (goto-char beg)
+      (.let* ((lexes (many (object-lex restriction)))
+              (cs (lexes->contents lexes))
+              (_ (widen)))
+        ;; Set the parent
+        (let (p (or acc parent))
+          (when p (for (el cs) (when (not (string? el)) 
+                                 (set! (org-element-property parent: el) p)))))
+        ;;; If there's truly an element to give our contents to, giv'r!
+        (return (if acc
+                  (begin0 acc (set! (org-element-contents acc) cs))
+                   cs)))))
 
-       ;; Fill ~element contents by side-effect.
-       ;; If element already has contents
-       ;; Greater element: parse between contents-begin: and
-       ;; contents-end:
-       ((parse-greater-element-contents? type) #t)))
-          ))
-      (widen)
-      (return elements)
+#+end_src
 
-      ))
+*** /Parser/ ~parse-current-element~
 
-
+#+begin_src gerbil
   ;;; Parsing Element Starting At Point
   ;;
-  ;; `parse-current-element' is the core function of this section. It returns the Gerbil
-  ;; representation of the element starting at point.
+  ;; `parse-current-element' is the core function of this section. It returns the
+  ;; Gerbil representation of the element starting at point.
   ;;
-  ;; `parse-current-element' makes use of special modes. They are activated for fixed
-  ;; element chaining (e.g., `plain-list' > `item') or fixed conditional element
-  ;; chaining (e.g., `headline' > `section'). Special modes are: `first-section',
-  ;; `item', `node-property', `section' and `table-row'.
-
+  ;; `parse-current-element' makes use of special modes. They are activated for
+  ;; fixed element chaining (e.g., `plain-list' > `item') or fixed conditional
+  ;; element chaining (e.g., `headline' > `section'). Special modes are:
+  ;; `first-section', `item', `node-property', `section' and `table-row'.
 
   (def (parse-current-element (granularity #f) (mode #f) (structure #f))
     (def raw-secondary? (and granularity (not (eq? granularity 'object))))
     (.first
      (.or
+       (.let* (p (point)) (displayln "parse current element " mode " at " p "\n") (fail))
+       (if (not (eq? mode 'table-row)) (fail)
+           (table-ro
+
       (headline-parser raw-secondary?)
-      (.let*
-       (afk (collect-affiliated-keywords))
-       (.or (table-parser afk #f)
-            (fail)))
-         )))
-
-
-  ;; Return either values of the string that comes before the object and the next
-  ;; object, or #f. ~restriction~ is a list of object types, as symbols, that
-  ;; should be looked after.
-
-  (def (object-lex restriction)
-    (.let* ((lst (some (item)))
-            (obj (.or (and (memq 'timestamp restriction)
-                           (timestamp-parser))
-                      (.begin (sat (lambda _ (not (null? lst))) (.not (item))) #f))))
-           (values (list->string lst) obj)))
-
-  (def (parse-objects (beg 0) (end +inf.0) (acc #f) (restriction all-objects) (parent #f))
-    (def (lexes->contents lexs)
-      (def contents [])
-        (let lp ((ls lexs))
-          (unless (null? ls) 
-            (let ((values str obj) (car ls))
-              (unless (string-null? str) (push! str contents))
-              (when obj
-                (push! obj contents)
-                (let ((obj-end (org-element-property end: obj))
-                      (cont-beg (org-element-property contents-begin: obj)))
-                    ;; Fill contents of ~object~ if needed
-                    (when cont-beg
-                      (parse-objects cont-beg (org-element-property contents-end: obj)
-                                     obj (org-element-restriction obj)))))
-                (lp (cdr ls)))))
-     (reverse! contents))
-
-    (.begin
-     (narrow-to-region beg end)
-     (goto-char beg)
-
-     (.let*
-      (cs ((liftP lexes->contents) (many (object-lex restriction))))
-
-
-      (return cs))))
-
+      (.let* (afk (collect-affiliated-keywords))
+       (.or (table-parser afk granularity)
+            (if (eq? mode 'no-paragraph) (fail)
+                (paragraph-parser)))))))
 #+end_src
+
 
 *** ~-next-node~
 
@@ -374,14 +457,14 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
   local parsing ignores contents, it only makes sense to use this
   function on a part of an AST. 
 
- ~org-element-contents-set!~ sets the contents.
+ ~org-element-contents-set!~ sets the contents and returns the element.
 
 #+begin_src gerbil
   (def (org-element-contents el) 
     (let (c (cddr el)) (if (null? c) #f c)))
 
   (def (org-element-contents-set! el contents)
-    (set-cdr! (cdr el) contents))
+    (.begin0 el (set-cdr! (cdr el) contents)))
 
 #+end_src
 
@@ -529,7 +612,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
                ;; Now the value
                (val (org-element-property value: afk))
                ;; If we're parsed, parse!
-               (restrict (org-element-restriction 'keyword))
+               (restrict (org-element-object-restrictions 'keyword))
                (parse? (member key parsed-keywords))
                (val (if parse?
                         (run (parse-objects 0 +inf.0 #f restrict) val)
@@ -605,11 +688,33 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
         (string or nil).
    - ~:value~ :: Raw call, as Org syntax (string).
 
-** Bold
+** DONE Bold                                                :RecursiveObject:
+   CLOSED: [2019-11-16 Sat 23:29]
 
    Recursive object.
 
    No specific property.
+
+   '*This +is+ bold!*'
+
+   Bold is just the first mentioned ~emphasis~ element.
+
+
+   #+begin_src gerbil :noweb-ref emphasis-objects
+  (def (bold-parser)
+    (.begin (peek #\*) (emphasis-parser)))
+   #+end_src
+
+*** Emphasis Elements (*,=,+,_,~,-)
+
+   CONTENTS can contain any object encountered in a paragraph when
+   markup is "bold", "italic", "strike-through" or "underline".
+#+NAME: emphasis-parser
+   #+begin_src gerbil :noweb-ref emphasis-parser
+     (def (emphasis-parser)
+       TEXT-MARKUP)
+   #+end_src
+
 
 ** Center Block
 
@@ -628,11 +733,18 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
    - ~:value~ :: Timestamp associated to clock keyword (timestamp
                  object).
 
-** Code
+** DONE Code                                                         :Object:
+   CLOSED: [2019-11-16 Sat 23:29]
 
    Object.
 
-   - ~:value~ :: Contents (string).
+   - ~value:~ :: Contents (string).
+
+
+#+begin_src gerbil :noweb-ref emphasis-objects
+  (def (code-parser)
+   (.begin (peek #\~) (emphasis-parser)))
+#+end_src
 
 ** Comment
 
@@ -759,7 +871,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 
 
 
-   - ~archived?~ :: True if the headline has an archive tag
+   - ~archived?:~ :: True if the headline has an archive tag
                      (boolean).
    - ~closed:~ :: Headline's CLOSED reference, if any (timestamp
                   object or #f)
@@ -792,8 +904,6 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 [[file:~/.emacs.d/elpa/org-plus-contrib-20190408/org-element.el::(defun%20org-element-headline-parser%20(limit%20&optional%20raw-secondary-p)][emacs lisp]]
 
 #+begin_src gerbil 
-
-
   (def (headline-parser (raw-secondary? #f))
     (def NODE-PROPERTIES
       (.let* (pd PROPERTYDRAWER)
@@ -806,57 +916,102 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
       (stars (return (org-element-property stars: h)))
       (todo (return (org-element-property todo-keyword: h)))
       (raw-value (return (org-element-property title: h)))
-      (title-end ((liftP 1-) (point)))
+      (title-end  (point))
       (level (return (length stars)))
       (time-props (.or (PLANNING (timestamp-parser)) []))
-      (standard-props []) ;(.or NODE-PROPERTIES []))
-      (end (peek (.begin (org-end-of-subtree level))))
-      (contents-begin (save-excursion
-                       (goto-char title-end)
-                       (skip-chars-forward " \n\r\t" end)
-                       (beginning-of-line)))
-      (pre-blank ((liftP 1-) (count-lines beg contents-begin)))
-      (contents-end (save-excursion
-                     (goto-char end)
-                     (skip-chars-backward " \n\r\t")
-                     (beginning-of-line 2)))
-      (post-blank ((liftP 1-) (count-lines contents-end end))))
+      (standard-props (.or NODE-PROPERTIES []))
+      (end (.begin (org-end-of-subtree level)))
+      (contents-begin (.or (save-excursion
+                            (goto-char title-end)
+                             (skip-chars-forward " \n\r\t" end)
+                             (.let* (pos (beginning-of-line))
+                               (return (if (or (= pos end)  (= pos beg)) #f pos))))
+                            #f))
+       (pre-blank (if (not contents-begin) (return 0)
+                      (count-lines title-end contents-begin)))
+      (contents-end (.or (save-excursion
+                          (goto-char end)
+                          (skip-chars-backward " \n\r\t")
+                          (beginning-of-line 2))
+                         #f))
+      (post-blank  (if (not contents-end) (return 0)
+                       (count-lines contents-end end))))
 
         (let (headline
               ['headline
                (append!
-                (list
-                 raw-value: raw-value
-                 begin: beg end: end
-                 pre-blank: pre-blank
-                 contents-begin: contents-begin
-                 contents-end: contents-end
-                 level: level
-                 priority: (org-element-property priority: h)
-                 tags: (org-element-property tags: h)
-                 todo-keyword: todo
-                 todo-type: (if todo
-                              (if (member todo (org-env-ref 'org-done-keywords))
-                                'done 'todo)
-                              #f)
-                 post-blank: post-blank
-                 footnote-section?: (org-element-property footnote-section?: h)
-                 archived?: (org-element-property archived?: h)
-                 commented?: (org-element-property commented?: h)
-                 post-affiliated: beg)
+                (list ;foo: title-end
+                      raw-value: raw-value
+                      begin: beg end: end
+                      pre-blank: pre-blank
+                      contents-begin: contents-begin
+                      contents-end: (and contents-begin contents-end)
+                      post-blank: post-blank
+                      level: level
+                      priority: (org-element-property priority: h)
+                      tags: (org-element-property tags: h)
+                      todo-keyword: todo
+                      todo-type: (if todo
+                                   (if (member todo (org-env-ref 'org-done-keywords))
+                                     'done 'todo)
+                                   #f)
+                      footnote-section?: (org-element-property footnote-section?: h)
+                      archived?: (org-element-property archived?: h)
+                      commented?: (org-element-property commented?: h)
+                      post-affiliated: beg)
                 (append time-props standard-props))])
           (begin0 headline
             (set! (org-element-property title: headline)
               (if raw-secondary? raw-value
                   (run (parse-objects
-                        0 +inf.0 #f (org-element-restriction 'headline)
+                        0 +inf.0 #f (org-element-object-restrictions 'headline)
                         headline) raw-value)))))))
 
 
 
 #+end_src
 
+*** INPROGRESS Usage and Testing 
+    :PROPERTIES:
+    :header-args: :noweb-ref headline-test
+    :END:
 
+
+#+begin_src gerbil 
+  (def headline-test
+    (test-suite
+     "Test suite for parsing headlines"
+
+     (test-case
+      "No linebreak"
+      (def el (run (headline-parser) "* Headline with no linebreak"))
+      (check-eqv? (org-element-property begin: el) 0)
+      (check-eqv? (org-element-property end: el) 28)
+      (check (and (not (org-element-property contents-begin: el))
+                  (not (org-element-property contents-end: el)))
+             => #t)
+      (check-equal? (org-element-property title: el) '("Headline with no linebreak")))
+
+     (test-case
+      "Many headlines, empty, no break at the end"
+      (def doc  "* 234
+  ,** 90
+  ,*** 67
+  ,**** 4567
+  ,***** 56789")
+      (def el (run (headline-parser) doc))
+
+      (check-eqv? (org-element-property end: el) 40)
+      (check-eqv? #\9 (run (.begin (goto-char 39) (item)) doc))
+      ;; See if the contents start the next headline
+      (def el2 (run (.begin (goto-char (org-element-property contents-begin: el))
+                            (headline-parser)) doc))
+
+      (check-equal? (org-element-property raw-value: el2) "90")
+
+      (check-eqv? (org-element-property end: el)
+                  (org-element-property end: el2)))))
+#+end_src
 ** Horizontal Rule
 
    Element.
@@ -910,11 +1065,16 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
    - ~:todo-type~ :: Type of inlinetask's TODO keyword, if any
                      (symbol: ~done~, ~todo~).
 
-** Italic
+** Italic                                                   :RecursiveObject:
 
    Recursive object.
 
    No specific property.
+
+#+begin_src gerbil :noweb-ref emphasis-objects
+  (def (italic-parser)
+   (.begin (peek #\/) (emphasis-parser)))
+#+end_src
 
 ** Item
 
@@ -1006,41 +1166,92 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
    - ~:key~ :: Property's name (string).
    - ~:value~ :: Property's value (string).
 
-** INPROGRESS Paragraph
+** INPROGRESS Paragraph                                             :Element:
 
    Element containing objects.
 
    No specific property.
    Empty lines and other elements end paragraphs.
 
-#+begin_src gerbil
+#+NAME: paragraph-parser
+#+begin_src gerbil 
   (def (paragraph-parser (afk []) values: (return-next-element-as-well #f)
                          granularity: (granularity #f))
     (def EMPTY-LINE (.begin (skip WS) (.or #\newline EOF)))
     (def END-PARAGRAPH
-      (.or EMPTY-LINE (parse-current-element granularity 'no-paragraph #f)))
+      (.or (parse-current-element granularity 'no-paragraph #f) EMPTY-LINE))
 
-    (.let*
-     ((beg (point))
-            (lines (some SKIP-LINE))
-            (lend (point))
-            (end-el END-PARAGRAPH)
+    (def (para)
+      (.let* ((pos (.begin SKIP-LINE (point)))
+              (end? (.or END-PARAGRAPH (.not (item)) #f)))
+        (if end?
+          (return (values pos end?))
+          (para))))
+
+    (.let* ((beg (.begin (.not EOF) (point)))
+            ((values lend end-el) (para))
             (end (if (org-element? end-el)
-                   (return end-el)
+                   (return (org-element-property begin: end-el))
                    (.begin (skip-chars-forward " \n\r\t")
                            (point))))
-            (post-blank (count-lines lend end)))
-     (let (paragraph ['paragraph (cons* begin: (if (null? afk) beg (car afk))
-                                        end: end
-                                        contents-begin: beg
-                                        contents-end:  (let (e (1- lend))
-                                                         (if (< e end) lend e))
-                                        post-blank: post-blank
-                                        post-affiliated: beg
-                                        afk)])
-       (if return-next-element-as-well
-         (values paragraph (if (org-element? end-el) end-el end-el))
-         paragraph))))
+            (post-blank (count-lines lend end))
+            (_ (goto-char end)))
+      (let (paragraph ['paragraph (cons* begin: (if (null? afk) beg (car afk))
+                                         end: end
+                                         contents-begin: beg
+                                         contents-end:
+                                         (if (eof-object? end-el)
+                                           end lend)
+                                         post-blank: post-blank
+                                         post-affiliated: beg
+                                         afk)])
+        (if return-next-element-as-well
+          (values paragraph (if (org-element? end-el) end-el #f))
+          paragraph))))
+#+end_src
+
+
+*** Test it out
+
+#+NAME: paragraph-test
+#+begin_src gerbil 
+    (def paragraph-test
+      (test-suite
+       "Test suite for parsing paragraphs from test/paragraph.org"
+
+      (test-case "Paragraph parsing with headline to end"
+       (def p-string "This is the first paragraph.\nThis is a part of the first paragraph.\n\nThe blank line should have ended it, so this is the second.\n\n\n\nThose blank lines ended that one, so now we're on the third.\n* This headline ends the Third, no linebreak")
+
+       (def paragraphs (run (many (paragraph-parser)) p-string))
+
+       (def values-of-elements (run (many (paragraph-parser [] values: #t)) p-string))
+       (def our-elements
+         (append-map (lambda (vs) (let ((values p next) vs) (cons p (if next [next] []))))
+                     values-of-elements))
+       (def our-paragraphs (filter (lambda (el) (eq? (org-element-type el) 'paragraph)) our-elements))
+
+       (def actual-elements (run (many (parse-current-element)) p-string))
+
+       (def actual-paragraphs (filter (lambda (el) (eq? (org-element-type el) 'paragraph)) actual-elements))
+       (check-equal? paragraphs our-paragraphs)
+       ;; We parse the headline as a headline and a paragraph. parse-current-element
+       ;; is smarter.
+       (check-equal? actual-paragraphs (take our-paragraphs 3))
+       (check-equal? (take our-elements 4) actual-elements))
+
+      (test-case
+       "No linebreak always messed me up"
+       (def pstr "This is a paragraph
+  This is the second line of the paragraph
+  This is the third, ends it with EOF")
+
+
+       )
+
+    
+    
+  ))
+
 
 #+end_src
 
@@ -1124,12 +1335,18 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 
    - ~:value~ :: Full cookie (string).
 
-** Strike Through
+** DONE Strike Through                                      :RecursiveObject:
+   CLOSED: [2019-11-16 Sat 23:29]
 
    Recursive object.
 
    No specific property.
 
+
+   #+begin_src gerbil :noweb-ref emphasis-objects
+  (def (strike-through-parser)
+    (.begin (peek #\+) (emphasis-parser)))
+   #+end_src
 ** Subscript
 
    Recursive object.
@@ -1144,7 +1361,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
    - ~:use-brackets-p~ :: Non-nil if contents are enclosed in curly
         brackets (t, nil).
 
-** INPROGRESS Table
+** INPROGRESS Table                                          :GreaterElement:
    :PROPERTIES:
    :END:
 
@@ -1158,13 +1375,13 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 Basically, this table becomes the following when parsed in full.
 
 #+NAME: this is a table
-| N | N^2 | N^3 | N^4 | sqrt(n) | sqrt[4](N) |
-|---+-----+-----+-----+---------+------------|
-| / |   < |     |   > |       < |          > |
-| 1 |   1 |   1 |   1 |       1 |          1 |
-| 2 |   4 |   8 |  16 |  1.4142 |     1.1892 |
-| 3 |   9 |  27 |  81 |  1.7321 |     1.3161 |
-|---+-----+-----+-----+---------+------------|
+  | N | N^2 | N^3 | N^4 | sqrt(n) | sqrt[4](N) |
+  |---+-----+-----+-----+---------+------------|
+  | / |   < |     |   > |       < |          > |
+  | 1 |   1 |   1 |   1 |       1 |          1 |
+  | 2 |   4 |   8 |  16 |  1.4142 |     1.1892 |
+  | 3 |   9 |  27 |  81 |  1.7321 |     1.3161 |
+  |---+-----+-----+-----+---------+------------|
 #+TBLFM: $2=$1^2::$3=$1^3::$4=$1^4::$5=sqrt($1)::$6=sqrt(sqrt(($1)))
 
 
@@ -1188,7 +1405,7 @@ Basically, this table becomes the following when parsed in full.
 
 #+NAME: table-parser
 #+begin_src gerbil
-  (def (table-parser (affiliated []) (table-row #f))
+  (def (table-parser (affiliated []) (granularity 'greater-element))
     ;; ~affiliated~ is a list of which ~car~ is the buffer position at the
     ;; beginning of the first affiliated keyword and ~cdr~ is a plist of
     ;; affiliated keywords along with their value.
@@ -1203,14 +1420,14 @@ Basically, this table becomes the following when parsed in full.
 
     (.let* ((b (if (not (null? affiliated)) (return (car affiliated)) (point)))
             (table-begin (point))
-            (contents (many1 (or table-row TABLE-LINE)))
+            (contents (many1 TABLE-LINE))
             (table-end (point))
             (tblfm (.or (many1 TBLFM) #f))
             (pos-before-blank (point))
             (blanks (many (.begin (many WS) #\newline)))
             (end (point))
             (afks (return (if (pair? affiliated) (cdr affiliated) [])))
-            (contents (return (if table-row contents []))))
+            (contents (return (if #f contents []))))
     ['table [begin: b end: end type: 'org tblfm: tblfm
              contents-begin: table-begin contents-end: table-end
              value: #f post-blank: (length blanks)
@@ -1267,17 +1484,269 @@ To write a table is very simple.
   
 
 
-** Table Cell
+** Table Row                                                        :Element:
+
+   Element containing objects.
+
+   - ~:type~ :: Row's type (symbol: ~standard~, ~rule~).
+
+  #+begin_src gerbil
+    (def (table-row-parser (afk []) (granularity 'element))
+      (.let* ((pa (point))
+              (beg (return (if (null? afk) pa (car afk))))
+              (cbeg (.begin (skip WS) #\| (point)))
+              (type (.or (.begin (sat (? (cut char=? #\- <>)) (peek))
+                                 (return 'rule))
+                         (return 'standard)))
+              (lend (end-of-line))
+              (cend (save-excursion
+                       (skip-chars-backward " \t")
+                       (point)))
+              (end (.begin (.or (item) EOF) (point))))
+        ['table-row (list
+                     type: type begin: beg end: end
+                     contents-begin: cbeg contents-end: cend
+                     post-blank: 0 post-affiliated: pa)]))
+
+  #+end_src
+*** emacs data 
+
+ #+begin_src emacs-lisp :results code
+   ;; Emacs Lisp
+   (set-buffer "element.org")
+   (org-element-map (org-element-parse-buffer) '(table table-row) 
+     (lambda (tbl)
+       (org-element-put-property tbl :parent '())
+       (list (car tbl) (cadr tbl)))
+     nil nil)
+ #+end_src
+
+ #+RESULTS:
+ #+begin_src emacs-lisp
+ ((table
+   (:begin 41740 :end 42178 :type org :tblfm
+           ("$2=$1^2::$3=$1^3::$4=$1^4::$5=sqrt($1)::$6=sqrt(sqrt(($1)))")
+           :contents-begin 41764 :contents-end 42107 :value nil :post-blank 2 :post-affiliated 41764 :name "this is a table" :parent nil))
+  (table-row
+   (:type standard :begin 41764 :end 41813 :contents-begin 41767 :contents-end 41812 :post-blank 0 :post-affiliated 41764 :parent nil))
+  (table-row
+   (:type rule :begin 41813 :end 41862 :contents-begin nil :contents-end nil :post-blank 0 :post-affiliated 41813 :parent nil))
+  (table-row
+   (:type standard :begin 41862 :end 41911 :contents-begin 41865 :contents-end 41910 :post-blank 0 :post-affiliated 41862 :parent nil))
+  (table-row
+   (:type standard :begin 41911 :end 41960 :contents-begin 41914 :contents-end 41959 :post-blank 0 :post-affiliated 41911 :parent nil))
+  (table-row
+   (:type standard :begin 41960 :end 42009 :contents-begin 41963 :contents-end 42008 :post-blank 0 :post-affiliated 41960 :parent nil))
+  (table-row
+   (:type standard :begin 42009 :end 42058 :contents-begin 42012 :contents-end 42057 :post-blank 0 :post-affiliated 42009 :parent nil))
+  (table-row
+   (:type rule :begin 42058 :end 42107 :contents-begin nil :contents-end nil :post-blank 0 :post-affiliated 42058 :parent nil))
+  (table
+   (:begin 44129 :end 44139 :type org :tblfm nil :contents-begin 44129 :contents-end 44138 :value nil :post-blank 1 :post-affiliated 44129 :parent nil))
+  (table-row
+   (:type standard :begin 44129 :end 44138 :contents-begin 44133 :contents-end 44137 :post-blank 0 :post-affiliated 44129 :parent nil))
+  (table
+   (:begin 44139 :end 44190 :type org :tblfm nil :contents-begin 44139 :contents-end 44190 :value nil :post-blank 0 :post-affiliated 44139 :parent nil))
+  (table-row
+   (:type standard :begin 44139 :end 44156 :contents-begin 44143 :contents-end 44155 :post-blank 0 :post-affiliated 44139 :parent nil))
+  (table-row
+   (:type rule :begin 44156 :end 44173 :contents-begin nil :contents-end nil :post-blank 0 :post-affiliated 44156 :parent nil))
+  (table-row
+   (:type standard :begin 44173 :end 44190 :contents-begin 44177 :contents-end 44189 :post-blank 0 :post-affiliated 44173 :parent nil)))
+ #+end_src
+
+
+  
+
+** Table Cell                                               :RecursiveObject:
 
    Recursive object.
 
    No specific property.
 
-** Table Row
 
-   Element containing objects.
+#+begin_src gerbil 
+  (assgetq 'table-cell object-restrictions)
+  ;; =>
+  '(bold code entity export-snippet footnote-reference italic latex-fragment link
+   macro radio-target strike-through subscript superscript target timestamp
+   underline verbatim)
+#+end_src
 
-   - ~:type~ :: Row's type (symbol: ~standard~, ~rule~).
+
+#+begin_src gerbil
+  (def (table-cell-parser (type 'standard))
+    (def STANDARD-CONTENTS (some (sat (? (not (cut member <> '(#\| #\newline)))))))
+    (def RULE-CONTENTS (many (sat (cut char=? #\- <>))))
+
+    (let ((beg (point))
+          (cbeg (.begin (skip WS) (point)))
+          (contents (if (eq? type 'standard) STANDARD-CONTENTS RULE-CONTENTS))
+          (cend (point))
+          (end (skip WS)
+               (.or (if (eq? type 'standard) #\| (.or #\+ #\|))
+                    (peek EOL))
+               (point)))
+      ['table-cell (list begin: beg end: end contents-begin:
+#+end_src
+
+ #+begin_src emacs-lisp :results code
+   ;; Emacs Lisp
+   (set-buffer "element.org")
+   (org-element-map (org-element-parse-buffer) '(table-cell) 
+     (lambda (tbl)
+       (org-element-put-property tbl :parent '())
+       tbl)
+     nil nil)
+ #+end_src
+
+ #+RESULTS:
+ #+begin_src emacs-lisp
+ ((table-cell
+   (:begin 41709 :end 41713 :contents-begin 41710 :contents-end 41711 :post-blank 0 :parent nil)
+   #("N" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41713 :end 41719 :contents-begin 41714 :contents-end 41717 :post-blank 0 :parent nil)
+   #("N" 0 1
+     (:parent #1))
+   (superscript
+    (:begin 41715 :end 41717 :use-brackets-p nil :contents-begin 41716 :contents-end 41717 :post-blank 0 :parent #1)
+    #("2" 0 1
+      (:parent #2))))
+  (table-cell
+   (:begin 41719 :end 41725 :contents-begin 41720 :contents-end 41723 :post-blank 0 :parent nil)
+   #("N" 0 1
+     (:parent #1))
+   (superscript
+    (:begin 41721 :end 41723 :use-brackets-p nil :contents-begin 41722 :contents-end 41723 :post-blank 0 :parent #1)
+    #("3" 0 1
+      (:parent #2))))
+  (table-cell
+   (:begin 41725 :end 41731 :contents-begin 41726 :contents-end 41729 :post-blank 0 :parent nil)
+   #("N" 0 1
+     (:parent #1))
+   (superscript
+    (:begin 41727 :end 41729 :use-brackets-p nil :contents-begin 41728 :contents-end 41729 :post-blank 0 :parent #1)
+    #("4" 0 1
+      (:parent #2))))
+  (table-cell
+   (:begin 41731 :end 41741 :contents-begin 41732 :contents-end 41739 :post-blank 0 :parent nil)
+   #("sqrt(n)" 0 7
+     (:parent #1)))
+  (table-cell
+   (:begin 41741 :end 41754 :contents-begin 41742 :contents-end 41752 :post-blank 0 :parent nil)
+   #("sqrt[4](N)" 0 10
+     (:parent #1)))
+  (table-cell
+   (:begin 41807 :end 41811 :contents-begin 41808 :contents-end 41809 :post-blank 0 :parent nil)
+   #("/" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41811 :end 41817 :contents-begin 41814 :contents-end 41815 :post-blank 0 :parent nil)
+   #("<" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41817 :end 41823 :contents-begin 41822 :contents-end 41822 :post-blank 0 :parent nil))
+  (table-cell
+   (:begin 41823 :end 41829 :contents-begin 41826 :contents-end 41827 :post-blank 0 :parent nil)
+   #(">" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41829 :end 41839 :contents-begin 41836 :contents-end 41837 :post-blank 0 :parent nil)
+   #("<" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41839 :end 41852 :contents-begin 41849 :contents-end 41850 :post-blank 0 :parent nil)
+   #(">" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41856 :end 41860 :contents-begin 41857 :contents-end 41858 :post-blank 0 :parent nil)
+   #("1" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41860 :end 41866 :contents-begin 41863 :contents-end 41864 :post-blank 0 :parent nil)
+   #("1" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41866 :end 41872 :contents-begin 41869 :contents-end 41870 :post-blank 0 :parent nil)
+   #("1" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41872 :end 41878 :contents-begin 41875 :contents-end 41876 :post-blank 0 :parent nil)
+   #("1" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41878 :end 41888 :contents-begin 41885 :contents-end 41886 :post-blank 0 :parent nil)
+   #("1" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41888 :end 41901 :contents-begin 41898 :contents-end 41899 :post-blank 0 :parent nil)
+   #("1" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41905 :end 41909 :contents-begin 41906 :contents-end 41907 :post-blank 0 :parent nil)
+   #("2" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41909 :end 41915 :contents-begin 41912 :contents-end 41913 :post-blank 0 :parent nil)
+   #("4" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41915 :end 41921 :contents-begin 41918 :contents-end 41919 :post-blank 0 :parent nil)
+   #("8" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41921 :end 41927 :contents-begin 41923 :contents-end 41925 :post-blank 0 :parent nil)
+   #("16" 0 2
+     (:parent #1)))
+  (table-cell
+   (:begin 41927 :end 41937 :contents-begin 41929 :contents-end 41935 :post-blank 0 :parent nil)
+   #("1.4142" 0 6
+     (:parent #1)))
+  (table-cell
+   (:begin 41937 :end 41950 :contents-begin 41942 :contents-end 41948 :post-blank 0 :parent nil)
+   #("1.1892" 0 6
+     (:parent #1)))
+  (table-cell
+   (:begin 41954 :end 41958 :contents-begin 41955 :contents-end 41956 :post-blank 0 :parent nil)
+   #("3" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41958 :end 41964 :contents-begin 41961 :contents-end 41962 :post-blank 0 :parent nil)
+   #("9" 0 1
+     (:parent #1)))
+  (table-cell
+   (:begin 41964 :end 41970 :contents-begin 41966 :contents-end 41968 :post-blank 0 :parent nil)
+   #("27" 0 2
+     (:parent #1)))
+  (table-cell
+   (:begin 41970 :end 41976 :contents-begin 41972 :contents-end 41974 :post-blank 0 :parent nil)
+   #("81" 0 2
+     (:parent #1)))
+  (table-cell
+   (:begin 41976 :end 41986 :contents-begin 41978 :contents-end 41984 :post-blank 0 :parent nil)
+   #("1.7321" 0 6
+     (:parent #1)))
+  (table-cell
+   (:begin 41986 :end 41999 :contents-begin 41991 :contents-end 41997 :post-blank 0 :parent nil)
+   #("1.3161" 0 6
+     (:parent #1)))
+  (table-cell
+   (:begin 44075 :end 44079 :contents-begin 44078 :contents-end 44078 :post-blank 0 :parent nil))
+  (table-cell
+   (:begin 44085 :end 44091 :contents-begin 44086 :contents-end 44089 :post-blank 0 :parent nil)
+   #("asd" 0 3
+     (:parent #1)))
+  (table-cell
+   (:begin 44091 :end 44097 :contents-begin 44092 :contents-end 44095 :post-blank 0 :parent nil)
+   #("asd" 0 3
+     (:parent #1)))
+  (table-cell
+   (:begin 44119 :end 44125 :contents-begin 44124 :contents-end 44124 :post-blank 0 :parent nil))
+  (table-cell
+   (:begin 44125 :end 44131 :contents-begin 44130 :contents-end 44130 :post-blank 0 :parent nil)))
+ #+end_src
 
 ** Target
 
@@ -1416,17 +1885,27 @@ To write a table is very simple.
 
 #+end_src
 
-** Underline
+** DONE Underline                                           :RecursiveObject:
+   CLOSED: [2019-11-16 Sat 23:28]
 
    Recursive object.
 
-   No specific property.
+   No _specific_ property.
 
+   #+begin_src gerbil :noweb-ref emphasis-objects
+  (def (underline-parser)
+    (.begin (peek #\_) (emphasis-parser)))
+   #+end_src
 ** Verbatim
 
-   Object.
+   =Object.=
 
    - ~:value~ :: Contents (string).
+
+   #+begin_src gerbil :noweb-ref emphasis-objects
+  (def (verbatim-parser)
+    (.begin (peek #\=) (emphasis-parser)))
+   #+end_src
 
 ** Verse Block
 
@@ -1468,13 +1947,25 @@ To write a table is very simple.
    information.
 
 
+* Test it all out
+
+
+#+begin_src gerbil :noweb yes :tangle "test-element.ss" 
+  (import :drewc/org/element :drewc/org/syntax :drewc/org/location
+          :drewc/smug :std/misc/ports :std/srfi/1 :std/test)
+
+  <<headline-test>>
+
+#+end_src
+
+
 * /file/ element.ss
 
 #+begin_src gerbil :noweb yes :tangle element.ss
   ;; (c) drewc <me@drewc.ca> All Rights Reserved
   (import :drewc/smug 
           :drewc/org/syntax :drewc/org/environment :drewc/org/location
-          :std/srfi/13 :std/srfi/1 :gerbil/gambit/exact :std/misc/list)
+          :std/srfi/13 :std/srfi/1 :gerbil/gambit/exact :std/misc/list :std/iter)
   (export #t)
 
   <<element-descriptions>>
@@ -1501,7 +1992,14 @@ To write a table is very simple.
   <<headline-element>>
 
   <<snapshot>>
+
+  <<paragraph-parser>>
+
+  <<emphasis-parser>>
+
+  <<emphasis-objects>>
 #+end_src
+
 * Copyright
 
 Documentation from the orgmode.org/worg/ website (either in its HTML format or
