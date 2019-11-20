@@ -1611,6 +1611,7 @@ NAME can contain any non-whitespace character.
 
    POST is a whitespace character, ~-~, ~.~, ~,~, ~:~, ~!~, ~?~, ~'~,
    ~)~, ~}~ or a double quote.  It can also be an end of line.
+ 
    #+begin_src gerbil
      (def POST (.or (sat (cut string-any <> " -,.:!?')}\""))
                     (peek #\newline)))

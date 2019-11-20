@@ -107,17 +107,23 @@
   (let (c (cddr el)) (if (null? c) #f c)))
 
 (def (org-element-contents-set! el contents)
-  (.begin0 el (set-cdr! (cdr el) contents)))
+  (for (c contents) (set! (org-element-property parent: c) el))
+  (begin0 el (set-cdr! (cdr el) contents)))
 
 
 (def (org-element-property-set! prop el value)
-  (def props (let lp ((ps (cadr el)))
+  (def (%set!)
+    (def props (let lp ((ps (cadr el)))
                (cond ((null? ps) [])
                      ((eq? prop (car ps))
                       (lp (cddr ps)))
                      (#t 
                       (cons* (first ps) (second ps) (lp (cddr ps)))))))
-  (set-car! (cdr el) (cons* prop value props)))
+    (set-car! (cdr el) (cons* prop value props)))
+
+  (if (string? el) (plain-text-property-set! prop el value)
+      (%set!)))
+
 
 
 ;; * Affiliated Keywords
@@ -208,25 +214,69 @@
 
   ;; A | followed by anything that is not WS marks a table line
 
-  (def TABLE-LINE
-    (.begin (skip WS) #\| (skip WS) (sat (? (not char-whitespace?))) SKIP-LINE))
+  (def TABLE-ROW
+     (if (eq? granularity 'greater-element)
+       (.begin (skip WS) #\| (skip WS)
+               (sat (? (not char-whitespace?))) SKIP-LINE)
+       (table-row-parser granularity)))
 
   (.let* ((b (if (not (null? affiliated)) (return (car affiliated)) (point)))
           (table-begin (point))
-          (contents (many1 TABLE-LINE))
+          (contents (many1 TABLE-ROW))
           (table-end (point))
           (tblfm (.or (many1 TBLFM) #f))
           (pos-before-blank (point))
           (blanks (many (.begin (many WS) #\newline)))
           (end (point))
-          (afks (return (if (pair? affiliated) (cdr affiliated) [])))
-          (contents (return (if #f contents []))))
-  ['table [begin: b end: end type: 'org tblfm: tblfm
-           contents-begin: table-begin contents-end: table-end
-           value: #f post-blank: (length blanks)
-           post-affiliated: table-begin
-           . afks]
-          . contents]))
+          (afks (return (if (pair? affiliated) (cdr affiliated) []))))
+    (let (el ['table (cons* begin: b end: end type: 'org tblfm: tblfm
+                           contents-begin: table-begin contents-end: table-end
+                           ;;; emacs tables get a value
+                           value: #f
+                           post-blank: (length blanks)
+                           post-affiliated: table-begin
+                           afks)])
+
+       (begin0 (return el)
+         (unless (eq? granularity 'greater-element)
+           (set! (org-element-contents el) contents))))))
+(def (table-row-parser  (granularity 'element))
+  (.let* ((beg (point))
+          (cbeg (.begin (skip WS) #\| (point)))
+          (type (.or (.begin (sat (? (cut char=? #\- <>)) (peek))
+                             (return 'rule))
+                     (return 'standard)))
+          (lend (end-of-line))
+          (cend (save-excursion
+                 (skip-chars-backward " \t")
+                 (point)))
+          (end (.begin (.or (item) EOF) (point)))
+          (row (return ['table-row
+                        (list
+                         type: type begin: beg end: end
+                         contents-begin: cbeg contents-end: cend
+                         post-blank: 0 post-affiliated: beg)]))
+          (contents (if (not (memq granularity '(object #f))) #f
+                        (parse-objects cbeg cend row [(if (eq? type 'rule)
+                                                        'table-cell-rule
+                                                        'table-cell)]))))
+    (return row)))
+
+(def (table-cell-parser (type 'standard))
+  (def STANDARD-CONTENTS (some (sat (? (not (cut member <> '(#\| #\newline)))))))
+  (def RULE-CONTENTS (many (sat (cut char=? #\- <>))))
+
+  (.let* ((beg (point))
+          (cbeg (.begin (skip WS) (point)))
+          (contents (if (eq? type 'standard) STANDARD-CONTENTS RULE-CONTENTS))
+          (cend (point))
+          (end (.begin (skip WS)
+                        (.or (if (eq? type 'standard) #\| (.or #\+ #\|))
+                             (peek EOL))
+                        (point))))
+    (if (= beg end) (fail)
+        ['table-cell (list begin: beg end: end
+                           contents-begin: cbeg contents-end: cend)])))
 
 (def (timestamp-parser)
   (def (stamp-type stamp)
@@ -406,10 +456,6 @@
              (and (eq? granularity 'greater-element)
                   (eq? type 'section))
              (eq? type 'headline))))
-  (def elements [])
-  (def (ret)
-    elements)
-
   (.begin
     (goto-char beg)
     (narrow-to-region beg end)
@@ -437,7 +483,7 @@
                          (cbeg (org-element-property contents-begin: el))
                          (cend (org-element-property contents-end: el)))
                     (displayln el)
-                    (push! el elements) )
+                    (push! el elements))
                   (.let* (contents 
                           (cond
                            ;; If element has no contents, don't modify it.
@@ -491,7 +537,9 @@
          (obj? 'italic (italic-parser))
          (obj? 'verbatim (verbatim-parser))
          (obj? 'strike-through (strike-through-parser))
-         (obj? 'timestamp (timestamp-parser))))
+         (obj? 'timestamp (timestamp-parser))
+         (obj? 'table-cell (table-cell-parser))
+         (obj? 'table-cell-rule (table-cell-parser 'rule))))
 
     (.let* ((lst (some (item)))
             (obj (.or lex-objs
@@ -528,33 +576,42 @@
     (.let* ((lexes (many (object-lex restriction)))
             (cs (lexes->contents lexes))
             (_ (widen)))
-      ;; Set the parent
-      (let (p (or acc parent))
-        (when p (for (el cs) (when (not (string? el)) 
-                               (set! (org-element-property parent: el) p)))))
-      ;;; If there's truly an element to give our contents to, giv'r!
-      (return (if acc
-                (begin0 acc (set! (org-element-contents acc) cs))
-                 cs)))))
-
+      (when parent
+        (for (el cs) (when (not (string? el))
+                       (set! (org-element-property parent: el) parent))))
+      ;;  If there's truly an element to give our contents to, giv'r!
+      (if acc
+        (begin0 (return acc)
+          (org-element-contents-set! acc cs))
+        (return cs)))))
 ;;; Parsing Element Starting At Point
 ;;
 ;; `parse-current-element' is the core function of this section. It returns the
 ;; Gerbil representation of the element starting at point.
+;;
+;; GRANULARITY determines the depth of the
+;; recursion.  Allowed values are `headline', `greater-element',
+;; `element', `object' or nil.  When it is broader than `object' (or
+;; nil), secondary values will not be parsed, since they only
+;; contain objects.
 ;;
 ;; `parse-current-element' makes use of special modes. They are activated for
 ;; fixed element chaining (e.g., `plain-list' > `item') or fixed conditional
 ;; element chaining (e.g., `headline' > `section'). Special modes are:
 ;; `first-section', `item', `node-property', `section' and `table-row'.
 
+
+
 (def (parse-current-element (granularity #f) (mode #f) (structure #f))
   (def raw-secondary? (and granularity (not (eq? granularity 'object))))
   (.first
    (.or
      (.let* (p (point)) (displayln "parse current element " mode " at " p "\n") (fail))
+     (if (not (eq? mode 'table-row)) (fail)
+         (table-row-parser granularity))
     (headline-parser raw-secondary?)
     (.let* (afk (collect-affiliated-keywords))
-     (.or (table-parser afk #f)
+     (.or (table-parser afk granularity)
           (if (eq? mode 'no-paragraph) (fail)
               (paragraph-parser)))))))
 (def (next-mode type parent?)

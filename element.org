@@ -139,7 +139,7 @@ like to avoid.
       (if (not element)
         (hash-put! plain-text-properties-table text ['plain-text [prop value]])
         (set! (org-element-property prop element) value)))))
-    
+
 #+end_src
 
 Easy! Now [[#accessors][Accessors]] can operate on strings.
@@ -216,7 +216,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 
 [[file:~/.emacs.d/elpa/org-plus-contrib-20190408/org-element.el::(defun%20org-element--parse-elements][el --parse-elements]]
 
-*** INPROGRESS /Parser/ parse-elements 
+*** INPROGRESS /Parser/ ~parse-elements~ 
  #+begin_src gerbil
    (def (parse-buffer str (granularity 'object))
      (run (parse-elements 0 (string-length str) 'first-section #f granularity ['org-data []])
@@ -245,10 +245,6 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
                 (and (eq? granularity 'greater-element)
                      (eq? type 'section))
                 (eq? type 'headline))))
-     (def elements [])
-     (def (ret)
-       elements)
-
      (.begin
        (goto-char beg)
        (narrow-to-region beg end)
@@ -276,7 +272,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
                             (cbeg (org-element-property contents-begin: el))
                             (cend (org-element-property contents-end: el)))
                        (displayln el)
-                       (push! el elements) )
+                       (push! el elements))
                      (.let* (contents 
                              (cond
                               ;; If element has no contents, don't modify it.
@@ -317,73 +313,74 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 
  #+end_src
 
-*** /Parser/ ~parse-objects~
+*** INPROGRESS /Parser/ ~parse-objects~
 
 #+begin_src gerbil
-    ;; Return either values of the string that comes before the object and the next
-    ;; object, or #f. ~restriction~ is a list of object types, as symbols, that
-    ;; should be looked after.
+      ;; Return either values of the string that comes before the object and the next
+      ;; object, or #f. ~restriction~ is a list of object types, as symbols, that
+      ;; should be looked after.
 
-  (def (object-lex restrictions)
-    (def (obj? name parser)
-      (if (not (memq name restrictions)) (fail)
-          parser))
+    (def (object-lex restrictions)
+      (def (obj? name parser)
+        (if (not (memq name restrictions)) (fail)
+            parser))
 
-    (def lex-objs
-      (.or (obj? 'code (code-parser))
-           (obj? 'bold (bold-parser))
-           (obj? 'italic (italic-parser))
-           (obj? 'verbatim (verbatim-parser))
-           (obj? 'strike-through (strike-through-parser))
-           (obj? 'timestamp (timestamp-parser))))
+      (def lex-objs
+        (.or (obj? 'code (code-parser))
+             (obj? 'bold (bold-parser))
+             (obj? 'italic (italic-parser))
+             (obj? 'verbatim (verbatim-parser))
+             (obj? 'strike-through (strike-through-parser))
+             (obj? 'timestamp (timestamp-parser))
+             (obj? 'table-cell (table-cell-parser))
+             (obj? 'table-cell-rule (table-cell-parser 'rule))))
 
-      (.let* ((lst (some (item)))
-              (obj (.or lex-objs
-                        ;; if the list is not null, but we're at the end of the
-                        ;; line, return #f for the object
-                        (.begin (sat (lambda _ (not (null? lst))) (.not (item))) #f))))
-             (values (list->string lst) obj)))
+        (.let* ((lst (some (item)))
+                (obj (.or lex-objs
+                          ;; if the list is not null, but we're at the end of the
+                          ;; line, return #f for the object
+                          (.begin (sat (lambda _ (not (null? lst))) (.not (item))) #f))))
+               (values (list->string lst) obj)))
 
-  (def (parse-objects (beg 0) (end +inf.0) (acc #f) (restriction all-objects) (parent #f))
-    (def (lexes->contents lexs)
-      (def contents [])
-      (let lp ((ls lexs))
-        (if (null? ls) (return (reverse! contents))
-          (let ((values str obj) (car ls))
-            (unless (string-null? str) (push! str contents))
-            (cond
-             ((not obj) (lp (cdr ls)))
-             (#t  
-              (push! obj contents)
-              (let ((obj-end (org-element-property end: obj))
-                    (cont-beg (org-element-property contents-begin: obj)))
-                ;; Fill contents of ~object~ if needed
-                  (.begin
-                    (if (and (org-element-recursive-object? obj)
-                             cont-beg)
-                      (parse-objects cont-beg (org-element-property contents-end: obj)
-                                     obj (org-element-object-restrictions obj))
-                      #t)
-                    (lp (cdr ls))))))))))
+    (def (parse-objects (beg 0) (end +inf.0) (acc #f) (restriction all-objects) (parent #f))
+      (def (lexes->contents lexs)
+        (def contents [])
+        (let lp ((ls lexs))
+          (if (null? ls) (return (reverse! contents))
+            (let ((values str obj) (car ls))
+              (unless (string-null? str) (push! str contents))
+              (cond
+               ((not obj) (lp (cdr ls)))
+               (#t  
+                (push! obj contents)
+                (let ((obj-end (org-element-property end: obj))
+                      (cont-beg (org-element-property contents-begin: obj)))
+                  ;; Fill contents of ~object~ if needed
+                    (.begin
+                      (if (and (org-element-recursive-object? obj)
+                               cont-beg)
+                        (parse-objects cont-beg (org-element-property contents-end: obj)
+                                       obj (org-element-object-restrictions obj))
+                        #t)
+                      (lp (cdr ls))))))))))
 
-    (.begin
-      (narrow-to-region beg end)
-      (goto-char beg)
-      (.let* ((lexes (many (object-lex restriction)))
-              (cs (lexes->contents lexes))
-              (_ (widen)))
-        ;; Set the parent
-        (let (p (or acc parent))
-          (when p (for (el cs) (when (not (string? el)) 
-                                 (set! (org-element-property parent: el) p)))))
-        ;;; If there's truly an element to give our contents to, giv'r!
-        (return (if acc
-                  (begin0 acc (set! (org-element-contents acc) cs))
-                   cs)))))
-
+      (.begin
+        (narrow-to-region beg end)
+        (goto-char beg)
+        (.let* ((lexes (many (object-lex restriction)))
+                (cs (lexes->contents lexes))
+                (_ (widen)))
+          (when parent
+            (for (el cs) (when (not (string? el))
+                           (set! (org-element-property parent: el) parent))))
+          ;;  If there's truly an element to give our contents to, giv'r!
+          (if acc
+            (begin0 (return acc)
+              (org-element-contents-set! acc cs))
+            (return cs)))))
 #+end_src
 
-*** /Parser/ ~parse-current-element~
+*** INPROGRESS /Parser/ ~parse-current-element~
 
 #+begin_src gerbil
   ;;; Parsing Element Starting At Point
@@ -391,10 +388,18 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
   ;; `parse-current-element' is the core function of this section. It returns the
   ;; Gerbil representation of the element starting at point.
   ;;
+  ;; GRANULARITY determines the depth of the
+  ;; recursion.  Allowed values are `headline', `greater-element',
+  ;; `element', `object' or nil.  When it is broader than `object' (or
+  ;; nil), secondary values will not be parsed, since they only
+  ;; contain objects.
+  ;;
   ;; `parse-current-element' makes use of special modes. They are activated for
   ;; fixed element chaining (e.g., `plain-list' > `item') or fixed conditional
   ;; element chaining (e.g., `headline' > `section'). Special modes are:
   ;; `first-section', `item', `node-property', `section' and `table-row'.
+
+
 
   (def (parse-current-element (granularity #f) (mode #f) (structure #f))
     (def raw-secondary? (and granularity (not (eq? granularity 'object))))
@@ -402,8 +407,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
      (.or
        (.let* (p (point)) (displayln "parse current element " mode " at " p "\n") (fail))
        (if (not (eq? mode 'table-row)) (fail)
-           (table-ro
-
+           (table-row-parser granularity))
       (headline-parser raw-secondary?)
       (.let* (afk (collect-affiliated-keywords))
        (.or (table-parser afk granularity)
@@ -412,7 +416,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 #+end_src
 
 
-*** ~-next-node~
+*** /function/ ~next-node~
 
 #+begin_src gerbil
   (def (next-mode type parent?)
@@ -464,7 +468,8 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
     (let (c (cddr el)) (if (null? c) #f c)))
 
   (def (org-element-contents-set! el contents)
-    (.begin0 el (set-cdr! (cdr el) contents)))
+    (for (c contents) (set! (org-element-property parent: c) el))
+    (begin0 el (set-cdr! (cdr el) contents)))
 
 #+end_src
 
@@ -511,13 +516,18 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 
   #+begin_src gerbil
     (def (org-element-property-set! prop el value)
-      (def props (let lp ((ps (cadr el)))
+      (def (%set!)
+        (def props (let lp ((ps (cadr el)))
                    (cond ((null? ps) [])
                          ((eq? prop (car ps))
                           (lp (cddr ps)))
                          (#t 
                           (cons* (first ps) (second ps) (lp (cddr ps)))))))
-      (set-car! (cdr el) (cons* prop value props)))
+        (set-car! (cdr el) (cons* prop value props)))
+
+      (if (string? el) (plain-text-property-set! prop el value)
+          (%set!)))
+
   #+end_src
 
   Note that, even though structures obtained with local parsers are
@@ -536,7 +546,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
   elements within the tree, respectively before a precise location or
   after all children.
 
-* Types and Attributes
+* INPROGRESS Types and Attributes
   :PROPERTIES:
   :CUSTOM_ID: attributes
   :header-args: :noweb-ref object-parser
@@ -688,7 +698,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
         (string or nil).
    - ~:value~ :: Raw call, as Org syntax (string).
 
-** DONE Bold                                                :RecursiveObject:
+** DONE Bold     `                                          :RecursiveObject:
    CLOSED: [2019-11-16 Sat 23:29]
 
    Recursive object.
@@ -1030,7 +1040,6 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
    - ~:end-header~ :: Header arguments applied to the calling instance
         (string or nil).
    - ~:value~ :: Raw call, as Org syntax (string).
-
 ** Inline Src Block
 
    Object.
@@ -1403,8 +1412,7 @@ Basically, this table becomes the following when parsed in full.
          :name "this is a table" :parent nil))
 #+end_src
 
-#+NAME: table-parser
-#+begin_src gerbil
+#+begin_src gerbil :noweb-ref table-parser
   (def (table-parser (affiliated []) (granularity 'greater-element))
     ;; ~affiliated~ is a list of which ~car~ is the buffer position at the
     ;; beginning of the first affiliated keyword and ~cdr~ is a plist of
@@ -1415,25 +1423,32 @@ Basically, this table becomes the following when parsed in full.
 
     ;; A | followed by anything that is not WS marks a table line
 
-    (def TABLE-LINE
-      (.begin (skip WS) #\| (skip WS) (sat (? (not char-whitespace?))) SKIP-LINE))
+    (def TABLE-ROW
+       (if (eq? granularity 'greater-element)
+         (.begin (skip WS) #\| (skip WS)
+                 (sat (? (not char-whitespace?))) SKIP-LINE)
+         (table-row-parser granularity)))
 
     (.let* ((b (if (not (null? affiliated)) (return (car affiliated)) (point)))
             (table-begin (point))
-            (contents (many1 TABLE-LINE))
+            (contents (many1 TABLE-ROW))
             (table-end (point))
             (tblfm (.or (many1 TBLFM) #f))
             (pos-before-blank (point))
             (blanks (many (.begin (many WS) #\newline)))
             (end (point))
-            (afks (return (if (pair? affiliated) (cdr affiliated) [])))
-            (contents (return (if #f contents []))))
-    ['table [begin: b end: end type: 'org tblfm: tblfm
-             contents-begin: table-begin contents-end: table-end
-             value: #f post-blank: (length blanks)
-             post-affiliated: table-begin
-             . afks]
-            . contents]))
+            (afks (return (if (pair? affiliated) (cdr affiliated) []))))
+      (let (el ['table (cons* begin: b end: end type: 'org tblfm: tblfm
+                             contents-begin: table-begin contents-end: table-end
+                             ;;; emacs tables get a value
+                             value: #f
+                             post-blank: (length blanks)
+                             post-affiliated: table-begin
+                             afks)])
+
+         (begin0 (return el)
+           (unless (eq? granularity 'greater-element)
+             (set! (org-element-contents el) contents))))))
 #+end_src
 
 
@@ -1490,23 +1505,28 @@ To write a table is very simple.
 
    - ~:type~ :: Row's type (symbol: ~standard~, ~rule~).
 
-  #+begin_src gerbil
-    (def (table-row-parser (afk []) (granularity 'element))
-      (.let* ((pa (point))
-              (beg (return (if (null? afk) pa (car afk))))
+  #+begin_src gerbil :noweb-ref table-parser
+    (def (table-row-parser  (granularity 'element))
+      (.let* ((beg (point))
               (cbeg (.begin (skip WS) #\| (point)))
               (type (.or (.begin (sat (? (cut char=? #\- <>)) (peek))
                                  (return 'rule))
                          (return 'standard)))
               (lend (end-of-line))
               (cend (save-excursion
-                       (skip-chars-backward " \t")
-                       (point)))
-              (end (.begin (.or (item) EOF) (point))))
-        ['table-row (list
-                     type: type begin: beg end: end
-                     contents-begin: cbeg contents-end: cend
-                     post-blank: 0 post-affiliated: pa)]))
+                     (skip-chars-backward " \t")
+                     (point)))
+              (end (.begin (.or (item) EOF) (point)))
+              (row (return ['table-row
+                            (list
+                             type: type begin: beg end: end
+                             contents-begin: cbeg contents-end: cend
+                             post-blank: 0 post-affiliated: beg)]))
+              (contents (if (not (memq granularity '(object #f))) #f
+                            (parse-objects cbeg cend row [(if (eq? type 'rule)
+                                                            'table-cell-rule
+                                                            'table-cell)]))))
+        (return row)))
 
   #+end_src
 *** emacs data 
@@ -1574,20 +1594,22 @@ To write a table is very simple.
 #+end_src
 
 
-#+begin_src gerbil
+#+begin_src gerbil :noweb-ref table-parser
   (def (table-cell-parser (type 'standard))
     (def STANDARD-CONTENTS (some (sat (? (not (cut member <> '(#\| #\newline)))))))
     (def RULE-CONTENTS (many (sat (cut char=? #\- <>))))
 
-    (let ((beg (point))
-          (cbeg (.begin (skip WS) (point)))
-          (contents (if (eq? type 'standard) STANDARD-CONTENTS RULE-CONTENTS))
-          (cend (point))
-          (end (skip WS)
-               (.or (if (eq? type 'standard) #\| (.or #\+ #\|))
-                    (peek EOL))
-               (point)))
-      ['table-cell (list begin: beg end: end contents-begin:
+    (.let* ((beg (point))
+            (cbeg (.begin (skip WS) (point)))
+            (contents (if (eq? type 'standard) STANDARD-CONTENTS RULE-CONTENTS))
+            (cend (point))
+            (end (.begin (skip WS)
+                          (.or (if (eq? type 'standard) #\| (.or #\+ #\|))
+                               (peek EOL))
+                          (point))))
+      (if (= beg end) (fail)
+          ['table-cell (list begin: beg end: end
+                             contents-begin: cbeg contents-end: cend)])))
 #+end_src
 
  #+begin_src emacs-lisp :results code
@@ -1602,150 +1624,20 @@ To write a table is very simple.
 
  #+RESULTS:
  #+begin_src emacs-lisp
- ((table-cell
-   (:begin 41709 :end 41713 :contents-begin 41710 :contents-end 41711 :post-blank 0 :parent nil)
-   #("N" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41713 :end 41719 :contents-begin 41714 :contents-end 41717 :post-blank 0 :parent nil)
-   #("N" 0 1
-     (:parent #1))
-   (superscript
-    (:begin 41715 :end 41717 :use-brackets-p nil :contents-begin 41716 :contents-end 41717 :post-blank 0 :parent #1)
-    #("2" 0 1
-      (:parent #2))))
-  (table-cell
-   (:begin 41719 :end 41725 :contents-begin 41720 :contents-end 41723 :post-blank 0 :parent nil)
-   #("N" 0 1
-     (:parent #1))
-   (superscript
-    (:begin 41721 :end 41723 :use-brackets-p nil :contents-begin 41722 :contents-end 41723 :post-blank 0 :parent #1)
-    #("3" 0 1
-      (:parent #2))))
-  (table-cell
-   (:begin 41725 :end 41731 :contents-begin 41726 :contents-end 41729 :post-blank 0 :parent nil)
-   #("N" 0 1
-     (:parent #1))
-   (superscript
-    (:begin 41727 :end 41729 :use-brackets-p nil :contents-begin 41728 :contents-end 41729 :post-blank 0 :parent #1)
-    #("4" 0 1
-      (:parent #2))))
-  (table-cell
-   (:begin 41731 :end 41741 :contents-begin 41732 :contents-end 41739 :post-blank 0 :parent nil)
-   #("sqrt(n)" 0 7
-     (:parent #1)))
-  (table-cell
-   (:begin 41741 :end 41754 :contents-begin 41742 :contents-end 41752 :post-blank 0 :parent nil)
-   #("sqrt[4](N)" 0 10
-     (:parent #1)))
-  (table-cell
-   (:begin 41807 :end 41811 :contents-begin 41808 :contents-end 41809 :post-blank 0 :parent nil)
-   #("/" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41811 :end 41817 :contents-begin 41814 :contents-end 41815 :post-blank 0 :parent nil)
-   #("<" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41817 :end 41823 :contents-begin 41822 :contents-end 41822 :post-blank 0 :parent nil))
-  (table-cell
-   (:begin 41823 :end 41829 :contents-begin 41826 :contents-end 41827 :post-blank 0 :parent nil)
-   #(">" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41829 :end 41839 :contents-begin 41836 :contents-end 41837 :post-blank 0 :parent nil)
-   #("<" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41839 :end 41852 :contents-begin 41849 :contents-end 41850 :post-blank 0 :parent nil)
-   #(">" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41856 :end 41860 :contents-begin 41857 :contents-end 41858 :post-blank 0 :parent nil)
-   #("1" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41860 :end 41866 :contents-begin 41863 :contents-end 41864 :post-blank 0 :parent nil)
-   #("1" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41866 :end 41872 :contents-begin 41869 :contents-end 41870 :post-blank 0 :parent nil)
-   #("1" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41872 :end 41878 :contents-begin 41875 :contents-end 41876 :post-blank 0 :parent nil)
-   #("1" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41878 :end 41888 :contents-begin 41885 :contents-end 41886 :post-blank 0 :parent nil)
-   #("1" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41888 :end 41901 :contents-begin 41898 :contents-end 41899 :post-blank 0 :parent nil)
-   #("1" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41905 :end 41909 :contents-begin 41906 :contents-end 41907 :post-blank 0 :parent nil)
-   #("2" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41909 :end 41915 :contents-begin 41912 :contents-end 41913 :post-blank 0 :parent nil)
-   #("4" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41915 :end 41921 :contents-begin 41918 :contents-end 41919 :post-blank 0 :parent nil)
-   #("8" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41921 :end 41927 :contents-begin 41923 :contents-end 41925 :post-blank 0 :parent nil)
-   #("16" 0 2
-     (:parent #1)))
-  (table-cell
-   (:begin 41927 :end 41937 :contents-begin 41929 :contents-end 41935 :post-blank 0 :parent nil)
-   #("1.4142" 0 6
-     (:parent #1)))
-  (table-cell
-   (:begin 41937 :end 41950 :contents-begin 41942 :contents-end 41948 :post-blank 0 :parent nil)
-   #("1.1892" 0 6
-     (:parent #1)))
-  (table-cell
-   (:begin 41954 :end 41958 :contents-begin 41955 :contents-end 41956 :post-blank 0 :parent nil)
-   #("3" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41958 :end 41964 :contents-begin 41961 :contents-end 41962 :post-blank 0 :parent nil)
-   #("9" 0 1
-     (:parent #1)))
-  (table-cell
-   (:begin 41964 :end 41970 :contents-begin 41966 :contents-end 41968 :post-blank 0 :parent nil)
-   #("27" 0 2
-     (:parent #1)))
-  (table-cell
-   (:begin 41970 :end 41976 :contents-begin 41972 :contents-end 41974 :post-blank 0 :parent nil)
-   #("81" 0 2
-     (:parent #1)))
-  (table-cell
-   (:begin 41976 :end 41986 :contents-begin 41978 :contents-end 41984 :post-blank 0 :parent nil)
-   #("1.7321" 0 6
-     (:parent #1)))
-  (table-cell
-   (:begin 41986 :end 41999 :contents-begin 41991 :contents-end 41997 :post-blank 0 :parent nil)
-   #("1.3161" 0 6
-     (:parent #1)))
-  (table-cell
-   (:begin 44075 :end 44079 :contents-begin 44078 :contents-end 44078 :post-blank 0 :parent nil))
-  (table-cell
-   (:begin 44085 :end 44091 :contents-begin 44086 :contents-end 44089 :post-blank 0 :parent nil)
-   #("asd" 0 3
-     (:parent #1)))
-  (table-cell
-   (:begin 44091 :end 44097 :contents-begin 44092 :contents-end 44095 :post-blank 0 :parent nil)
-   #("asd" 0 3
-     (:parent #1)))
-  (table-cell
-   (:begin 44119 :end 44125 :contents-begin 44124 :contents-end 44124 :post-blank 0 :parent nil))
-  (table-cell
-   (:begin 44125 :end 44131 :contents-begin 44130 :contents-end 44130 :post-blank 0 :parent nil)))
+   ((table-cell
+     (:begin 41709 :end 41713 :contents-begin 41710 :contents-end 41711 :post-blank 0 :parent nil)
+     #("N" 0 1
+       (:parent #1)))
+    (table-cell
+     (:begin 41713 :end 41719 :contents-begin 41714 :contents-end 41717 :post-blank 0 :parent nil)
+     #("N" 0 1
+       (:parent #1))
+     (superscript
+      (:begin 41715 :end 41717 :use-brackets-p nil :contents-begin 41716 :contents-end 41717 :post-blank 0 :parent #1)
+      #("2" 0 1
+        (:parent #2))))
+    ;; [...]
+    )
  #+end_src
 
 ** Target
@@ -1952,7 +1844,8 @@ To write a table is very simple.
 
 #+begin_src gerbil :noweb yes :tangle "test-element.ss" 
   (import :drewc/org/element :drewc/org/syntax :drewc/org/location
-          :drewc/smug :std/misc/ports :std/srfi/1 :std/test)
+          :drewc/smug :std/misc/ports :std/srfi/1 :std/misc/list
+          :std/iter :std/sugar :std/srfi/13 :std/test)
 
   <<headline-test>>
 
