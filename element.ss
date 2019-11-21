@@ -11,20 +11,25 @@
     latex-environment node-property paragraph plain-list planning property-drawer
     quote-block section special-block src-block table table-row verse-block))
 
-(def (org-element? el) (and (pair? el) (memq (car el) all-elements) #t))
+(def (org-element-element? el) (and (pair? el) (memq (car el) all-elements) #t))
 
 (def greater-elements
   '(center-block drawer dynamic-block footnote-definition headline inlinetask
     item plain-list property-drawer quote-block section special-block table))
 
-(def (org-greater-element? el)
+(def (org-element-greater-element? el)
   (and (memq (if (symbol? el) el (car el)) greater-elements)  #t))
 
-  (def all-objects
+
+(def all-objects
     '(bold code entity export-snippet footnote-reference inline-babel-call
   inline-src-block italic line-break latex-fragment link macro radio-target
   statistics-cookie strike-through subscript superscript table-cell target
   timestamp underline verbatim))
+
+(def (org-element-object? el) (and (pair? el) (memq (car el) all-objects) #t))
+
+(def org-element? (? (or org-element-element? org-element-object?)))
 
 (def object-restrictions
 
@@ -86,6 +91,20 @@
 (def (org-element-recursive-object? el)
   (and (memq (if (symbol? el) el (car el)) recursive-objects)  #t))
 
+(def secondary-value-alist
+  '((headline title:)
+    (inlinetask title:)
+    (item tag:)))
+
+(def (org-element-secondary-value el)
+  (let (key (assgetq (org-element-type el) secondary-value-alist))
+    (and key (org-element-property key el))))
+
+(def parsed-properties-alist
+  '(("CAPTION" . caption:)))
+
+
+
 (def plain-text-properties-table (make-hash-table-eq weak-keys: #t))
 
 (def (plain-text-property prop plain-text)
@@ -99,16 +118,107 @@
       (set! (org-element-property prop element) value)))))
 
 
-(def (org-element-type el) (if (string? el) 'plain-text (car el)))
+(def (org-element-type el)
+  (cond ((string? el) 'plain-text) ((org-element? el) (car el)) (#t #f)))
 
 (def (org-element-property prop el)
   (if (string? el) (plain-text-property prop el)) (pgetq prop (cadr el)))
 (def (org-element-contents el) 
-  (let (c (cddr el)) (if (null? c) #f c)))
+  (let (c (if (string? el) [] (cddr el))) (if (null? c) #f c)))
 
 (def (org-element-contents-set! el contents)
   (for (c contents) (set! (org-element-property parent: c) el))
   (begin0 el (set-cdr! (cdr el) contents)))
+
+(def (org-element-map data types fn
+                      info: (info '())
+                      first-match: (first? #f)
+                      no-recursion: (no-recursions '())
+                      with-affiliated: (with-affiliated? #t))
+  ;; Should we map this element?
+  (def (map-type? type) (or (eq? types #t) (memq type types)))
+
+  (def (granularity)
+    (let/cc found
+      (let ((gran 'greater-elements)
+            (all-objects (cons 'plain-text all-objects)))
+        (if (eq? types #t) 'objects
+            (for (type types) (cond ((memq type all-objects) (found 'objects))
+                                    ((not (org-element-greater-element? type))
+                                     (set! gran 'elements)))))
+        (found gran))))
+
+
+
+  (def results [])
+
+  (let ((granulatity (granularity))
+        (no-recursion (if (symbol? no-recursions) (list no-recursions) no-recursions)))
+    (let/cc first-match
+
+      (let walk-tree ((d data))
+        (let ((type (org-element-type d)))
+          (cond
+           ((or (null? d) (not d)) #f)
+           ;; A list (like o-e-contents returns)
+           ((and (not type) (list? d)) (for (d d) (walk-tree d)))
+           ;; If it's a parse-tree (aka (org-data [] contents ...)), walk the contents
+           ((eq? type 'org-data) (walk-tree (org-element-contents d)))
+           ((not type) (error "No element type for " d))
+           (#t
+            (let (el d)
+              ;; If we map this type, call the fn
+              (when (map-type? type)
+                (let (r (fn el))
+                  (and r (if first? (.begin (set! results r) (first-match))
+                             (push! r results)))))
+
+              ;; If this type has a secondary string, walk it.
+              (cond ((and (eq? granularity 'objects) (org-element-secondary-value el))
+                     => (cut walk-tree <>)))
+
+              ;; If there's a keyword that has objects, and ~with-affiliated~ says
+              ;; to walk them, walk it.
+
+              (when (and with-affiliated? (eq? granularity 'objects)
+                         (or (org-element-element? el)    
+                             (org-element-greater-element? el))) 
+                (for ([name . key] parsed-properties-alist)      
+                  (let (val (org-element-property key el))       
+                    (and val (not (void? val))                                 
+                         (cond                                   
+                          ;; Ok, if this is a dual-keyword, that means that its 
+                          ;; value is (cons x y), were the first is last. 
+                          ((memq key dual-keywords) 
+                           ;; If it's a multiple, we parse it as a list where 
+                           ;; last comes first. ;
+                           (if (memq key multiple-keywords)       
+                             (for ([y . x] (reverse val))         
+                               (walk-tree x) (walk-tree y))       
+                             (match val ([y . x] (walk-tree x) (walk-tree y))))) 
+                          ;; If it's a multiple, we parse it as a list where 
+                          ;; last comes first 
+                          ((memq key multiple-keywords) (walk-tree (reverse val))) 
+                          ;; Otherwise, just walk it ;
+                          (#t (walk-tree val)))))))
+
+              ;; Now, should we recurse?
+              (unless (or 
+                        ;; If there's no recursion specficically 
+                        (memq type no-recursion)  
+                        ;; or no contents 
+                        (not (org-element-contents el)) 
+                        ;; Or we're not going that far 
+                        (and (eq? granularity 'greater-elements) 
+                             (not (org-element-greater-element? el))) 
+                        ;; Like, we want elements, but this is not one 
+                        (and (eq? granularity 'elements) 
+                             (not (org-element-element? el))))
+                (walk-tree (org-element-contents el))))))))))
+
+    ;; we've walked it, return the results
+    (if (list? results) (reverse results) results))
+
 
 
 (def (org-element-property-set! prop el value)
@@ -451,7 +561,7 @@
     ;;Make sure ~granularity~ allows the recursion, or
     ;; ~element~ is a headline, in which case going inside is
     ;; mandatory, in order to get sub-level headings.
-    (and (org-greater-element? el)
+    (and (org-element-greater-element? el)
          (or (memq granularity '(element object #f))
              (and (eq? granularity 'greater-element)
                   (eq? type 'section))
@@ -508,10 +618,7 @@
                            ((memq granularity '(object #f))
                             (displayln "Parsing objects " cbeg "-" cend " for " type)
                             (parse-objects cbeg cend el
-                                           (org-element-object-restrictions el))
-                            )
-
-
+                                           (org-element-object-restrictions el)))
                            (#t (return #f))))
                      ;; (when contents
                      ;;   (for (child contents)
