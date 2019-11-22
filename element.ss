@@ -235,6 +235,23 @@
       (%set!)))
 
 
+(def (org-element-take-post-blank
+      parent (child (let (c (org-element-contents parent))
+                      (and c (last c)))))
+  ;; => parent
+  (begin0 parent
+    (when child
+      (set! (org-element-property post-blank: parent) 
+        (org-element-property post-blank: child))
+      (set! (org-element-property post-blank: child) 0)
+      (set! (org-element-property end: parent)
+        (org-element-property end: child))
+      (when (org-element-property contents-end: child)
+        (set! (org-element-property contents-end: parent)
+          (org-element-property contents-end: child))
+        (set! (org-element-property end: child)
+          (org-element-property contents-end: child))))))
+
 
 ;; * Affiliated Keywords
 
@@ -473,7 +490,7 @@
 
 
 
-(def (headline-parser (raw-secondary? #f))
+(def (headline-parser (raw-secondary? #f) (granularity 'headline))
   (def NODE-PROPERTIES
     (.let* (pd PROPERTYDRAWER)
        (append-map!
@@ -489,15 +506,27 @@
     (level (return (length stars)))
     (time-props (.or (PLANNING (timestamp-parser)) []))
     (standard-props (.or NODE-PROPERTIES []))
-    (end (.begin (org-end-of-subtree level)))
     (contents-begin (.or (save-excursion
                           (goto-char title-end)
-                           (skip-chars-forward " \n\r\t" end)
+                           (skip-chars-forward " \n\r\t")
                            (.let* (pos (beginning-of-line))
-                             (return (if (or (= pos end)  (= pos beg)) #f pos))))
-                          #f))
-     (pre-blank (if (not contents-begin) (return 0)
-                    (count-lines title-end contents-begin)))
+                             (return (if (= pos beg) #f pos))))
+                         #f))
+    (pre-blank (if (not contents-begin) (return 0)
+                   (count-lines title-end contents-begin)))
+    (ss (and contents-begin
+             (.or
+               (parse-elements
+                contents-begin +inf.0 'section #f granularity)
+               #f)))
+    (_ (.let* (a #f) (displayln "Got a section " ss) #f))
+    (subtrees (and ss 
+                   (parse-elements
+                    (if (pair? ss) (org-element-property end: (car ss)) contents-begin)
+                    +inf.0 ['end-of-subtree level] #f granularity)))
+    (end (point))
+
+
     (contents-end (.or (save-excursion
                         (goto-char end)
                         (skip-chars-backward " \n\r\t")
@@ -507,7 +536,8 @@
                      (count-lines contents-end end))))
 
       (let (headline
-            ['headline
+            (cons*
+             'headline
              (append!
               (list ;foo: title-end
                     raw-value: raw-value
@@ -528,7 +558,8 @@
                     archived?: (org-element-property archived?: h)
                     commented?: (org-element-property commented?: h)
                     post-affiliated: beg)
-              (append time-props standard-props))])
+              (append time-props standard-props))
+             (if (and ss subtrees) (append ss subtrees) [])))
         (begin0 headline
           (set! (org-element-property title: headline)
             (if raw-secondary? raw-value
@@ -536,6 +567,26 @@
                       0 +inf.0 #f (org-element-object-restrictions 'headline)
                       headline) raw-value)))))))
 
+
+
+
+
+
+
+
+(def (section-parser (granularity #f))
+  (.let* ((beg (point))
+          (section (return ['section (list begin: beg contents-begin: beg
+                                           post-affiliated: beg)]))
+          ;; This is called by headline, so there is no pre-blanks, and contents
+          ;; start here as well. Anything before the next heading is an element
+          ;; in this section
+          (contents (parse-elements
+                     beg +inf.0 'end-at-heading #f granularity section)))
+    ;; With no contents, there is no section. Fail.
+    (if (not (org-element-contents section)) (fail)
+    ;; If the last of the contents is an element, steal the post-blank and fix the end.
+        (begin0 section (org-element-take-post-blank section)))))
 
 
 
@@ -629,6 +680,38 @@
               (if (not acc) (return els)
                   (begin0 (return acc) (set! (org-element-contents acc) els)))))))
 
+(def (parse-current-element (granularity #f) (mode #f) (structure #f))
+  "=> ~element~ /or/ #f"
+  (def raw-secondary? (and granularity (not (eq? granularity 'object))))
+  (.first
+   (.begin
+     (.let* (p (point)) (displayln "parse-current-element g:" granularity
+                                   " M: " mode " at " p "\n") #f)
+     ;; Now for predication.
+     (cond
+      ;; This is for headlines
+      ((and (pair? mode) (eq? (car mode) 'end-of-subtree))
+       (.not (org-end-of-subtree (cadr mode))))
+      ;; Paragraphs and sections
+      ((memq mode '(no-paragraph section end-at-heading)) (.not ORG-AT-HEADING))
+      ;; For all else, just pass anything.
+      (#t (return #t)))
+
+     ;;; Specific element modes
+     (cond
+      ((eq? mode 'section) (section-parser granularity))
+
+      ;; Otherwise, Giv'r! 
+      (#t 
+
+       (.or
+         ;; (if (not (eq? mode 'table-row)) (fail)
+         ;;     (table-row-parser granularity))
+         (headline-parser raw-secondary?)
+         (.let* (afk (collect-affiliated-keywords))
+           (.or (table-parser afk granularity)
+                (if (eq? mode 'no-paragraph) (fail)
+                    (paragraph-parser))))))))))
   ;; Return either values of the string that comes before the object and the next
   ;; object, or #f. ~restriction~ is a list of object types, as symbols, that
   ;; should be looked after.
@@ -691,36 +774,6 @@
         (begin0 (return acc)
           (org-element-contents-set! acc cs))
         (return cs)))))
-;;; Parsing Element Starting At Point
-;;
-;; `parse-current-element' is the core function of this section. It returns the
-;; Gerbil representation of the element starting at point.
-;;
-;; GRANULARITY determines the depth of the
-;; recursion.  Allowed values are `headline', `greater-element',
-;; `element', `object' or nil.  When it is broader than `object' (or
-;; nil), secondary values will not be parsed, since they only
-;; contain objects.
-;;
-;; `parse-current-element' makes use of special modes. They are activated for
-;; fixed element chaining (e.g., `plain-list' > `item') or fixed conditional
-;; element chaining (e.g., `headline' > `section'). Special modes are:
-;; `first-section', `item', `node-property', `section' and `table-row'.
-
-
-
-(def (parse-current-element (granularity #f) (mode #f) (structure #f))
-  (def raw-secondary? (and granularity (not (eq? granularity 'object))))
-  (.first
-   (.or
-     (.let* (p (point)) (displayln "parse current element " mode " at " p "\n") (fail))
-     (if (not (eq? mode 'table-row)) (fail)
-         (table-row-parser granularity))
-    (headline-parser raw-secondary?)
-    (.let* (afk (collect-affiliated-keywords))
-     (.or (table-parser afk granularity)
-          (if (eq? mode 'no-paragraph) (fail)
-              (paragraph-parser)))))))
 (def (next-mode type parent?)
   "Return next special mode according to TYPE, or #f.
 

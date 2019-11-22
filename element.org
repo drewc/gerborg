@@ -240,7 +240,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
           str))
  #+end_src
 
-*** INPROGRESS /Parser/ ~parse-elements~ 
+*** INPROGRESS /Parser/ ~parse-elements b e m s g a#~ 
  #+begin_src gerbil
 
    (defsyntax (nest stx)
@@ -331,106 +331,158 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 
  #+end_src
 
+*** INPROGRESS /Parser/ ~parse-current-element~
+
+ Parsing Element Starting At Point
+
+  ~parse-current-element~ is the core function of this section. It returns the
+  Gerbil representation of the element starting at point, or #f if there is no element.
+
+  GRANULARITY determines the depth of the recursion. Allowed values are
+  ~headline~, ~greater-element~, ~element~, ~object~ or ~#f~. When it is broader
+  than ~object~ (or ~#f~), secondary values will not be parsed, since they only
+  contain objects.
+
+  ~parse-current-element~ makes use of special modes.
+
+
+   They are activated parsing the contents of elements.
+   - ~section~ :: Will parse a section.
+   - ~end-at-heading~ :: When at a heading,  return ~#f~
+   - ~(end-of-subtree n)~ :: For headlines. 
+   - ~no-paragraph~ :: parsing for any element but paragraphs
+        
+
+
+
+#+begin_src gerbil
+  (def (parse-current-element (granularity #f) (mode #f) (structure #f))
+    "=> ~element~ /or/ #f"
+    (def raw-secondary? (and granularity (not (eq? granularity 'object))))
+    (.first
+     (.begin
+       (.let* (p (point)) (displayln "parse-current-element g:" granularity
+                                     " M: " mode " at " p "\n") #f)
+       ;; Now for predication.
+       (cond
+        ;; This is for headlines
+        ((and (pair? mode) (eq? (car mode) 'end-of-subtree))
+         (.not (org-end-of-subtree (cadr mode))))
+        ;; Paragraphs and sections
+        ((memq mode '(no-paragraph section end-at-heading)) (.not ORG-AT-HEADING))
+        ;; For all else, just pass anything.
+        (#t (return #t)))
+
+       ;;; Specific element modes
+       (cond
+        ((eq? mode 'section) (section-parser granularity))
+
+        ;; Otherwise, Giv'r! 
+        (#t 
+
+         (.or
+           ;; (if (not (eq? mode 'table-row)) (fail)
+           ;;     (table-row-parser granularity))
+           (headline-parser raw-secondary?)
+           (.let* (afk (collect-affiliated-keywords))
+             (.or (table-parser afk granularity)
+                  (if (eq? mode 'no-paragraph) (fail)
+                      (paragraph-parser))))))))))
+#+end_src
+
+**** INPROGRESS Usage 
+
+     #+begin_src gerbil :noweb-ref parse-current-element-test
+       (def parse-current-element-test
+         (test-suite
+          "Testing parse-current-element"
+          (test-case
+           "end-at-heading"
+           (def testb "This is a paragraph
+       ,#+name: now a table
+       |asd|asd|
+
+       ,* and this should end it")
+           (def el (run (parse-elements 0 1024 'end-at-heading #f #f ['org-doc []]) testb))
+
+           (def contents (org-element-contents el))
+           (check-equal? 2 (length contents))
+           (check-eq? (org-element-type (list-ref contents 0)) 'paragraph))
+
+          (def els (run (parse-elements 0 1024 #f #f #f ['org-doc []]) testb))
+
+          (def contentss (org-element-contents els))
+          (check-equal? 3 (length contentss))
+          (check-eq? (org-element-type (list-ref contentss 2)) 'headline)))
+
+     #+end_src
+
+
 *** INPROGRESS /Parser/ ~parse-objects~
 
 #+begin_src gerbil
-      ;; Return either values of the string that comes before the object and the next
-      ;; object, or #f. ~restriction~ is a list of object types, as symbols, that
-      ;; should be looked after.
+    ;; Return either values of the string that comes before the object and the next
+    ;; object, or #f. ~restriction~ is a list of object types, as symbols, that
+    ;; should be looked after.
 
-    (def (object-lex restrictions)
-      (def (obj? name parser)
-        (if (not (memq name restrictions)) (fail)
-            parser))
+  (def (object-lex restrictions)
+    (def (obj? name parser)
+      (if (not (memq name restrictions)) (fail)
+          parser))
 
-      (def lex-objs
-        (.or (obj? 'code (code-parser))
-             (obj? 'bold (bold-parser))
-             (obj? 'italic (italic-parser))
-             (obj? 'verbatim (verbatim-parser))
-             (obj? 'strike-through (strike-through-parser))
-             (obj? 'timestamp (timestamp-parser))
-             (obj? 'table-cell (table-cell-parser))
-             (obj? 'table-cell-rule (table-cell-parser 'rule))))
+    (def lex-objs
+      (.or (obj? 'code (code-parser))
+           (obj? 'bold (bold-parser))
+           (obj? 'italic (italic-parser))
+           (obj? 'verbatim (verbatim-parser))
+           (obj? 'strike-through (strike-through-parser))
+           (obj? 'timestamp (timestamp-parser))
+           (obj? 'table-cell (table-cell-parser))
+           (obj? 'table-cell-rule (table-cell-parser 'rule))))
 
-        (.let* ((lst (some (item)))
-                (obj (.or lex-objs
-                          ;; if the list is not null, but we're at the end of the
-                          ;; line, return #f for the object
-                          (.begin (sat (lambda _ (not (null? lst))) (.not (item))) #f))))
-               (values (list->string lst) obj)))
+      (.let* ((lst (some (item)))
+              (obj (.or lex-objs
+                        ;; if the list is not null, but we're at the end of the
+                        ;; line, return #f for the object
+                        (.begin (sat (lambda _ (not (null? lst))) (.not (item))) #f))))
+             (values (list->string lst) obj)))
 
-    (def (parse-objects (beg 0) (end +inf.0) (acc #f) (restriction all-objects) (parent #f))
-      (def (lexes->contents lexs)
-        (def contents [])
-        (let lp ((ls lexs))
-          (if (null? ls) (return (reverse! contents))
-            (let ((values str obj) (car ls))
-              (unless (string-null? str) (push! str contents))
-              (cond
-               ((not obj) (lp (cdr ls)))
-               (#t  
-                (push! obj contents)
-                (let ((obj-end (org-element-property end: obj))
-                      (cont-beg (org-element-property contents-begin: obj)))
-                  ;; Fill contents of ~object~ if needed
-                    (.begin
-                      (if (and (org-element-recursive-object? obj)
-                               cont-beg)
-                        (parse-objects cont-beg (org-element-property contents-end: obj)
-                                       obj (org-element-object-restrictions obj))
-                        #t)
-                      (lp (cdr ls))))))))))
+  (def (parse-objects (beg 0) (end +inf.0) (acc #f) (restriction all-objects) (parent #f))
+    (def (lexes->contents lexs)
+      (def contents [])
+      (let lp ((ls lexs))
+        (if (null? ls) (return (reverse! contents))
+          (let ((values str obj) (car ls))
+            (unless (string-null? str) (push! str contents))
+            (cond
+             ((not obj) (lp (cdr ls)))
+             (#t  
+              (push! obj contents)
+              (let ((obj-end (org-element-property end: obj))
+                    (cont-beg (org-element-property contents-begin: obj)))
+                ;; Fill contents of ~object~ if needed
+                  (.begin
+                    (if (and (org-element-recursive-object? obj)
+                             cont-beg)
+                      (parse-objects cont-beg (org-element-property contents-end: obj)
+                                     obj (org-element-object-restrictions obj))
+                      #t)
+                    (lp (cdr ls))))))))))
 
-      (.begin
-        (narrow-to-region beg end)
-        (goto-char beg)
-        (.let* ((lexes (many (object-lex restriction)))
-                (cs (lexes->contents lexes))
-                (_ (widen)))
-          (when parent
-            (for (el cs) (when (not (string? el))
-                           (set! (org-element-property parent: el) parent))))
-          ;;  If there's truly an element to give our contents to, giv'r!
-          (if acc
-            (begin0 (return acc)
-              (org-element-contents-set! acc cs))
-            (return cs)))))
-#+end_src
-
-*** INPROGRESS /Parser/ ~parse-current-element~
-
-#+begin_src gerbil
-  ;;; Parsing Element Starting At Point
-  ;;
-  ;; `parse-current-element' is the core function of this section. It returns the
-  ;; Gerbil representation of the element starting at point.
-  ;;
-  ;; GRANULARITY determines the depth of the
-  ;; recursion.  Allowed values are `headline', `greater-element',
-  ;; `element', `object' or nil.  When it is broader than `object' (or
-  ;; nil), secondary values will not be parsed, since they only
-  ;; contain objects.
-  ;;
-  ;; `parse-current-element' makes use of special modes. They are activated for
-  ;; fixed element chaining (e.g., `plain-list' > `item') or fixed conditional
-  ;; element chaining (e.g., `headline' > `section'). Special modes are:
-  ;; `first-section', `item', `node-property', `section' and `table-row'.
-
-
-
-  (def (parse-current-element (granularity #f) (mode #f) (structure #f))
-    (def raw-secondary? (and granularity (not (eq? granularity 'object))))
-    (.first
-     (.or
-       (.let* (p (point)) (displayln "parse current element " mode " at " p "\n") (fail))
-       (if (not (eq? mode 'table-row)) (fail)
-           (table-row-parser granularity))
-      (headline-parser raw-secondary?)
-      (.let* (afk (collect-affiliated-keywords))
-       (.or (table-parser afk granularity)
-            (if (eq? mode 'no-paragraph) (fail)
-                (paragraph-parser)))))))
+    (.begin
+      (narrow-to-region beg end)
+      (goto-char beg)
+      (.let* ((lexes (many (object-lex restriction)))
+              (cs (lexes->contents lexes))
+              (_ (widen)))
+        (when parent
+          (for (el cs) (when (not (string? el))
+                         (set! (org-element-property parent: el) parent))))
+        ;;  If there's truly an element to give our contents to, giv'r!
+        (if acc
+          (begin0 (return acc)
+            (org-element-contents-set! acc cs))
+          (return cs)))))
 #+end_src
 
 
@@ -667,10 +719,61 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
   Each greater element, element and object has a variable set of
   properties attached to it.  Among them, four are shared by all
   types: ~begin:~ and ~end:~, which refer to the beginning and ending
-  buffer positions of the considered element or object, ~:post-blank~,
+  buffer positions of the considered element or object, ~post-blank:~,
   which holds the number of blank lines, or white spaces, at its
-  end[fn:2] and ~:parent~, which refers to the element or object
+  end[fn:2] and ~parent:~, which refers to the element or object
   containing it.
+
+  For an element, when the last item of contents contains a ~post-blank:~, we
+  must steal it.
+
+  #+begin_src gerbil :noweb-ref take-post-blank
+    (def (org-element-take-post-blank
+          parent (child (let (c (org-element-contents parent))
+                          (and c (last c)))))
+      ;; => parent
+      (begin0 parent
+        (when child
+          (set! (org-element-property post-blank: parent) 
+            (org-element-property post-blank: child))
+          (set! (org-element-property post-blank: child) 0)
+          (set! (org-element-property end: parent)
+            (org-element-property end: child))
+          (when (org-element-property contents-end: child)
+            (set! (org-element-property contents-end: parent)
+              (org-element-property contents-end: child))
+            (set! (org-element-property end: child)
+              (org-element-property contents-end: child))))))
+  #+end_src
+
+#+begin_src gerbil :noweb-ref test-post-blank
+  (def test-take-post-blank
+    (test-suite "take-post-blank"
+    (test-case "Testing adoption by taking post blank"
+     (def testb  "first-section with post-blanks\n\n\n* Starting header")
+     (def el (run (.let* ((beg (point)) (parent (return ['parent [begin: beg]])))
+                      (parse-elements 0 1024 'end-at-heading #f #f parent))
+                  testb))
+     (def pg (car (org-element-contents el)))
+
+     (check-eqv? #f (org-element-property end: el))
+     (check-eqv? 33 (org-element-property end: pg))
+     (check-eqv? 31 (org-element-property contents-end: pg))
+     (check-eqv? 2 (org-element-property post-blank: pg))
+
+     (org-element-take-post-blank el)
+
+     (check-eqv? 33 (org-element-property end: el))
+     (check-eqv? 31 (org-element-property end: pg))
+     (check-eqv? 31 (org-element-property contents-end: pg))
+     (check-eqv? (org-element-property contents-end: el)
+                 (org-element-property contents-end: pg))
+     (check-eqv? 0 (org-element-property post-blank: pg))
+     (check-eqv? 2 (org-element-property post-blank: el)))))
+
+
+
+#+end_src
 
   Greater elements containing objects on the one hand, and elements or
   objects containing objects on the other hand also have
@@ -1026,7 +1129,7 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 [[file:~/.emacs.d/elpa/org-plus-contrib-20190408/org-element.el::(defun%20org-element-headline-parser%20(limit%20&optional%20raw-secondary-p)][emacs lisp]]
 
 #+begin_src gerbil 
-  (def (headline-parser (raw-secondary? #f))
+  (def (headline-parser (raw-secondary? #f) (granularity 'headline))
     (def NODE-PROPERTIES
       (.let* (pd PROPERTYDRAWER)
          (append-map!
@@ -1042,15 +1145,27 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
       (level (return (length stars)))
       (time-props (.or (PLANNING (timestamp-parser)) []))
       (standard-props (.or NODE-PROPERTIES []))
-      (end (.begin (org-end-of-subtree level)))
       (contents-begin (.or (save-excursion
                             (goto-char title-end)
-                             (skip-chars-forward " \n\r\t" end)
+                             (skip-chars-forward " \n\r\t")
                              (.let* (pos (beginning-of-line))
-                               (return (if (or (= pos end)  (= pos beg)) #f pos))))
-                            #f))
-       (pre-blank (if (not contents-begin) (return 0)
-                      (count-lines title-end contents-begin)))
+                               (return (if (= pos beg) #f pos))))
+                           #f))
+      (pre-blank (if (not contents-begin) (return 0)
+                     (count-lines title-end contents-begin)))
+      (ss (and contents-begin
+               (.or
+                 (parse-elements
+                  contents-begin +inf.0 'section #f granularity)
+                 #f)))
+      (_ (.let* (a #f) (displayln "Got a section " ss) #f))
+      (subtrees (and ss 
+                     (parse-elements
+                      (if (pair? ss) (org-element-property end: (car ss)) contents-begin)
+                      +inf.0 ['end-of-subtree level] #f granularity)))
+      (end (point))
+
+
       (contents-end (.or (save-excursion
                           (goto-char end)
                           (skip-chars-backward " \n\r\t")
@@ -1060,7 +1175,8 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
                        (count-lines contents-end end))))
 
         (let (headline
-              ['headline
+              (cons*
+               'headline
                (append!
                 (list ;foo: title-end
                       raw-value: raw-value
@@ -1081,13 +1197,18 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
                       archived?: (org-element-property archived?: h)
                       commented?: (org-element-property commented?: h)
                       post-affiliated: beg)
-                (append time-props standard-props))])
+                (append time-props standard-props))
+               (if (and ss subtrees) (append ss subtrees) [])))
           (begin0 headline
             (set! (org-element-property title: headline)
               (if raw-secondary? raw-value
                   (run (parse-objects
                         0 +inf.0 #f (org-element-object-restrictions 'headline)
                         headline) raw-value)))))))
+
+
+
+
 
 
 
@@ -1412,12 +1533,60 @@ Easy! Now [[#accessors][Accessors]] can operate on strings.
 
    - ~:raw-value~ :: Uninterpreted contents (string).
 
-** Section
+** INPROGRESS Section
+   :PROPERTIES:
+   :CUSTOM_ID: Section
+   :END:
 
    Greater element.
 
    No specific property.
 
+#+NAME: section-parser
+#+begin_src gerbil
+  (def (section-parser (granularity #f))
+    (.let* ((beg (point))
+            (section (return ['section (list begin: beg contents-begin: beg
+                                             post-affiliated: beg)]))
+            ;; This is called by headline, so there is no pre-blanks, and contents
+            ;; start here as well. Anything before the next heading is an element
+            ;; in this section
+            (contents (parse-elements
+                       beg +inf.0 'end-at-heading #f granularity section)))
+      ;; With no contents, there is no section. Fail.
+      (if (not (org-element-contents section)) (fail)
+      ;; If the last of the contents is an element, steal the post-blank and fix the end.
+          (begin0 section (org-element-take-post-blank section)))))
+
+
+#+end_src
+
+
+*** Emacs 
+
+#+begin_src emacs-lisp
+(defun org-element-section-parser (_)
+  "Parse a section.
+
+Return a list whose CAR is `section' and CDR is a plist
+containing `:begin', `:end', `:contents-begin', `contents-end',
+`:post-blank' and `:post-affiliated' keywords."
+  (save-excursion
+    ;; Beginning of section is the beginning of the first non-blank
+    ;; line after previous headline.
+    (let ((begin (point))
+	  (end (progn (org-with-limited-levels (outline-next-heading))
+		      (point)))
+	  (pos-before-blank (progn (skip-chars-backward " \r\t\n")
+				   (line-beginning-position 2))))
+      (list 'section
+	    (list :begin begin
+		  :end end
+		  :contents-begin begin
+		  :contents-end pos-before-blank
+		  :post-blank (count-lines pos-before-blank end)
+		  :post-affiliated begin)))))
+#+end_src
 ** Special Block
 
    Greater element.
@@ -1981,6 +2150,8 @@ To write a table is very simple.
 
   <<setters-code>>
 
+  <<take-post-blank>>
+
 
   ;; * Affiliated Keywords
 
@@ -1995,6 +2166,8 @@ To write a table is very simple.
   <<timestamp-element>>
 
   <<headline-element>>
+
+  <<section-parser>>
 
   <<snapshot>>
 
