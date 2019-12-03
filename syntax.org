@@ -71,6 +71,7 @@ Unless specified otherwise, case is not significant.
 #+begin_src gerbil
   (def BOL
     (.let* (p (point))
+     (unless p (error "Point is #f for BOL")) 
       (if (zero? p) (return #t) (peek (.begin (goto-char (- p 1)) #\newline)))))
 #+end_src
  
@@ -116,10 +117,10 @@ We often want to know if it's the end of line. But, the EOF is also EOL.
   
   A headline is defined as:
 
+
   #+BEGIN_EXAMPLE
   STARS KEYWORD PRIORITY TITLE TAGS
   #+END_EXAMPLE
-
 
   #+begin_src gerbil :noweb-ref headline
     (def (HEADLINE (min-depth 1))
@@ -1029,7 +1030,7 @@ NAME can contain any non-whitespace character.
 
    Table rows can only exist in tables.
 
-* Objects
+* STARTED Objects
   :PROPERTIES:
   :CUSTOM_ID: Objects
   :END:

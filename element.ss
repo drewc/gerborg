@@ -490,7 +490,13 @@
 
 
 
-(def (headline-parser (raw-secondary? #f) (granularity 'headline))
+(def debugl [])
+
+(def (debugp . args)
+  (.let* (a (point)) (push! (cons a args) debugl)
+            (apply displayln "At: " a " " args) #f))
+
+(def (headline-parser (raw-secondary? #f) (granularity 'headline) (min-level 1))
   (def NODE-PROPERTIES
     (.let* (pd PROPERTYDRAWER)
        (append-map!
@@ -498,12 +504,13 @@
                  (org-element-property value: np)])
         (org-element-contents pd))))
   (.let*
-   ((beg (point)) (h (HEADLINE))
+   ((beg (point)) (h (HEADLINE min-level))
     (stars (return (org-element-property stars: h)))
     (todo (return (org-element-property todo-keyword: h)))
     (raw-value (return (org-element-property title: h)))
     (title-end  (point))
     (level (return (length stars)))
+    (_ (debugp "Got a header : " raw-value " level " level))
     (time-props (.or (PLANNING (timestamp-parser)) []))
     (standard-props (.or NODE-PROPERTIES []))
     (contents-begin (.or (save-excursion
@@ -514,16 +521,21 @@
                          #f))
     (pre-blank (if (not contents-begin) (return 0)
                    (count-lines title-end contents-begin)))
+    (_ (debugp "title: " raw-value
+               " cbeg: " contents-begin))
     (ss (and contents-begin
              (.or
                (parse-elements
                 contents-begin +inf.0 'section #f granularity)
                #f)))
-    (_ (.let* (a #f) (displayln "Got a section " ss) #f))
-    (subtrees (and ss 
-                   (parse-elements
-                    (if (pair? ss) (org-element-property end: (car ss)) contents-begin)
-                    +inf.0 ['end-of-subtree level] #f granularity)))
+     (_ (if (null? ss)  (error "Do not have a section" contents-begin)
+           (goto-char (org-element-property end: (car ss)))))
+     (_ (.begin
+         (if ss (debugp "Have a section : " ss)
+             (debugp "No Section???"))))
+
+     (subtrees (many (headline-parser raw-secondary? granularity (1+ level))))
+    (_ (.let* (a #f) (displayln "Got a subtrees " subtrees) #f))
     (end (point))
 
 
@@ -533,8 +545,10 @@
                         (beginning-of-line 2))
                        #f))
     (post-blank  (if (not contents-end) (return 0)
-                     (count-lines contents-end end))))
+                     (count-lines contents-end end)))
 
+    )
+   ;(list beg ss)
       (let (headline
             (cons*
              'headline
@@ -573,7 +587,6 @@
 
 
 
-
 (def (section-parser (granularity #f))
   (.let* ((beg (point))
           (section (return ['section (list begin: beg contents-begin: beg
@@ -582,11 +595,18 @@
           ;; start here as well. Anything before the next heading is an element
           ;; in this section
           (contents (parse-elements
-                     beg +inf.0 'end-at-heading #f granularity section)))
-    ;; With no contents, there is no section. Fail.
-    (if (not (org-element-contents section)) (fail)
-    ;; If the last of the contents is an element, steal the post-blank and fix the end.
-        (begin0 section (org-element-take-post-blank section)))))
+                     beg +inf.0 'end-at-heading #f granularity section))
+          (section (begin0 (return section)
+                     (if (org-element-contents section)
+                       ;; If the last of the contents is an element, steal the
+                       ;; post-blank and fix the end.
+                       (org-element-take-post-blank section)
+                       (begin 
+                       (set! (org-element-property end: section) beg)
+                       (set! (org-element-property contents-end: section) beg)))))
+          ((_ (goto-char (org-element-property end: section)))))
+    (return section)))
+
 
 
 
@@ -627,7 +647,7 @@
     ;;  ;; Find current element's type and parse it accordingly to
     ;;  ;; its category.
     (.let*
-        (els
+      (els
          (nest
           (let ((elements [])
                 (next-element (parse-current-element granularity mode structure))))
@@ -635,17 +655,40 @@
             (nest (.let* (el (.or p #f)))
                   (if (not el) (return (reverse! elements)))
                   (let* ((next next-element)
-                         ;; Paragraph return VALUES
-                         (el (if (org-element? el) el
-                                 (match el ((values nel n)
-                                            (when n (set! next (return n)))
-                                            nel))))
-                         (type (org-element-type el))
-                         (cbeg (org-element-property contents-begin: el))
-                         (cend (org-element-property contents-end: el)))
-                    (displayln el)
-                    (push! el elements))
-                  (.let* (contents 
+                         ;; Paragraph and first-section return VALUES
+                         ((values v-el nx) (if (org-element? el) (values #f next) el))
+                          (el (if (org-element? el) el
+                                  (begin 
+                                    (when (and nx (org-element? nx))
+                                      (set! next (return nx)))
+                                    v-el)))
+                          (type (org-element-type el))
+                         ;; (cbeg (org-element-property contents-begin: el))
+                         ;; (cend (org-element-property contents-end: el))
+
+                          )
+                    (push! el elements)
+                    ;; If this is the 'first-section, the ~n~ is a list of the
+                    ;; elements for the document
+                    (displayln "Have el :" el " v-el: " v-el" nx:" nx "in " mode)
+                    (cond ((and nx (eq? mode 'first-section))
+                           (map (cut push! <> elements) nx)
+                           (parse-element (return #f)))
+                          (#t 
+                           (let (end (max (org-element-property end: el)
+                                          (org-element-property end: (car elements))))
+                             (displayln "Going to end: " end)
+                             (.begin (goto-char end) (parse-element next))))))))))
+        (.begin (widen)
+                (if (not acc)
+                  (return els) 
+                  (begin0 (return acc)
+                    (set! (org-element-contents acc) els)))))))
+
+#;(.let*
+                   ((_ (debugp "Parsing " type))
+
+                   (contents
                           (cond
                            ;; If element has no contents, don't modify it.
                            ((not cbeg) #f)
@@ -670,23 +713,17 @@
                             (displayln "Parsing objects " cbeg "-" cend " for " type)
                             (parse-objects cbeg cend el
                                            (org-element-object-restrictions el)))
-                           (#t (return #f))))
-                     ;; (when contents
-                     ;;   (for (child contents)
-                         ;(set! (org-element-property parent: child) el)))
-                    (.begin (goto-char (org-element-property end: el))
-                            (parse-element next)))))))
-      (.begin (widen)
-              (if (not acc) (return els)
-                  (begin0 (return acc) (set! (org-element-contents acc) els)))))))
+                           (#t (return #f))))))
 
 (def (parse-current-element (granularity #f) (mode #f) (structure #f))
   "=> ~element~ /or/ #f"
   (def raw-secondary? (and granularity (not (eq? granularity 'object))))
   (.first
    (.begin
-     (.let* (p (point)) (displayln "parse-current-element g:" granularity
-                                   " M: " mode " at " p "\n") #f)
+     (.let* (p (point)) (displayln "At: " p " parse-current-element g:" granularity
+                                   " M: " mode "\n") #f)
+     ;; Is there an item?
+     (peek (item))
      ;; Now for predication.
      (cond
       ;; This is for headlines
@@ -699,15 +736,20 @@
 
      ;;; Specific element modes
      (cond
-      ((eq? mode 'section) (section-parser granularity))
 
+      ((eq? mode 'first-section)
+       (.let* ((s (section-parser granularity))
+               (_ (debugp "Got the first section, headline time"))
+               (hs (.or (many1 (headline-parser raw-secondary? granularity)) #f)))
+         (values s hs)))
+      ((eq? mode 'section) (section-parser granularity))
       ;; Otherwise, Giv'r! 
       (#t 
 
        (.or
          ;; (if (not (eq? mode 'table-row)) (fail)
          ;;     (table-row-parser granularity))
-         (headline-parser raw-secondary?)
+         (headline-parser raw-secondary? granularity)
          (.let* (afk (collect-affiliated-keywords))
            (.or (table-parser afk granularity)
                 (if (eq? mode 'no-paragraph) (fail)
@@ -814,16 +856,25 @@ Modes can be either `first-section', `item', `node-property', `planning',
                  (.begin (skip-chars-forward " \n\r\t")
                          (point))))
           (post-blank (count-lines lend end))
+          (contents-end (return (if (eof-object? end-el)
+                                  end lend)))
+          (_ (debugp "Have cend" contents-end))
+          (contents (if (memq granularity '(objects #f))
+                      (parse-objects
+                       beg contents-end #f
+                       (org-element-object-restrictions 'paragraph))
+                      #f))
+
           (_ (goto-char end)))
     (let (paragraph ['paragraph (cons* begin: (if (null? afk) beg (car afk))
                                        end: end
                                        contents-begin: beg
-                                       contents-end:
-                                       (if (eof-object? end-el)
-                                         end lend)
+                                       contents-end: contents-end
+
                                        post-blank: post-blank
                                        post-affiliated: beg
                                        afk)])
+      (when contents (set! (org-element-contents paragraph) contents))
       (if return-next-element-as-well
         (values paragraph (if (org-element? end-el) end-el #f))
         paragraph))))

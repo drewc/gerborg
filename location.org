@@ -12,7 +12,6 @@
     (.or ORG-AT-HEADING
          #f))
 
-
   (def (org-end-of-subtree (level 1))
     (def END (.or (peek (sat (lambda (s) (= (length s) level)) STARS-ONLY)) EOF))
     (.begin END (point)))

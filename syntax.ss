@@ -13,6 +13,7 @@
    (def WS (sat (? (and char-whitespace? (not (cut char=? #\newline <>))))))
    (def BOL
      (.let* (p (point))
+      (unless p (error "Point is #f for BOL")) 
        (if (zero? p) (return #t) (peek (.begin (goto-char (- p 1)) #\newline)))))
    (def EOL (.or #\newline EOF))
    (def SKIP-LINE
